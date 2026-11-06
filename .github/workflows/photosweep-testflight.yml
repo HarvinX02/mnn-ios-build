@@ -69,6 +69,7 @@ jobs:
         working-directory: PhotoSweep
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           BUILD_NUM: ${{ inputs.build_number != '' && inputs.build_number || github.run_number }}
