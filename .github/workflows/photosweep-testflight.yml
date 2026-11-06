@@ -202,8 +202,11 @@ jobs:
           WHATS_NEW: ${{ inputs.whats_new }}
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet --disable-pip-version-check pyjwt
-          python3 PhotoSweep/ci/assign_testflight.py \
+          # macOS runner 的系统 Python 受 PEP 668 保护，直接 pip install 会报
+          # externally-managed-environment，因此用隔离的 venv。
+          python3 -m venv "$RUNNER_TEMP/ascvenv"
+          "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt
+          "$RUNNER_TEMP/ascvenv/bin/python" PhotoSweep/ci/assign_testflight.py \
             --build-number "$BUILD_NUM" \
             --whats-new "$WHATS_NEW"
 
