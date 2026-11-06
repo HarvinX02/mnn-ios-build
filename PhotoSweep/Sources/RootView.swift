@@ -23,7 +23,12 @@ struct RootView: View {
         .task {
             scanner.loadCache()
             let ok = await scanner.requestPermission()
-            if !ok { showPermission = true }
+            if !ok { showPermission = true; return }
+            // 判定规则升级后自动重算一次。
+            // 否则用户会拿着旧结果说"更新了还是有同样的问题"。
+            if scanner.needsRescan {
+                scanner.startScan(force: true)
+            }
         }
         .alert("需要相册权限", isPresented: $showPermission) {
             Button("去设置") {
@@ -79,6 +84,21 @@ struct ScanView: View {
 
     private var actionCard: some View {
         VStack(spacing: 14) {
+            if scanner.needsRescan {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("这批结果是用旧规则算的，需要重算才生效")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("现在重算") { scanner.startScan(force: true) }
+                        .font(.caption.weight(.semibold))
+                }
+                .padding(8)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
+
             Toggle("识别照片中的文字（较慢）", isOn: $enableOCR)
                 .onChange(of: enableOCR) { _, v in scanner.enableOCR = v }
 
@@ -157,6 +177,13 @@ struct ScanView: View {
         return "预计还需 \(Int(sec / 60)) 分钟"
     }
 
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
+    }
+
     private var statsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("统计")
@@ -182,6 +209,21 @@ struct ScanView: View {
                     .font(.subheadline.weight(.medium))
                 gradeBar
             }
+
+            Divider()
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("版本 \(appVersion)")
+                    Spacer()
+                    Text("判定规则 v\(AnalyzerVersion.current)")
+                }
+                if let t = scanner.lastAnalyzedAt {
+                    Text("上次分析 \(t.formatted(date: .abbreviated, time: .shortened))")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))

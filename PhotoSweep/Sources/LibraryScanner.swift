@@ -12,6 +12,13 @@ struct AssetInfo: Sendable {
     let fileSize: Int64?
     let isScreenshot: Bool
     let isVideo: Bool
+    let isPanorama: Bool
+    let isLivePhoto: Bool
+    let uti: String
+
+    /// 相机拍的原生照片一般是 HEIC/JPEG；截图和存下来的网图多为 PNG。
+    /// 这是判断"屏幕内容"的一个便宜信号，不需要额外读图。
+    var isPNG: Bool { uti.contains("png") }
 
     var megapixels: Double {
         Double(pixelWidth * pixelHeight) / 1_000_000.0
@@ -23,6 +30,7 @@ struct AssetInfo: Sendable {
 private func makeInfo(_ asset: PHAsset) -> AssetInfo {
     let res = PHAssetResource.assetResources(for: asset)
     let size = res.first?.value(forKey: "fileSize") as? Int64
+    let uti = res.first?.uniformTypeIdentifier ?? ""
     return AssetInfo(
         id: asset.localIdentifier,
         creationDate: asset.creationDate,
@@ -30,7 +38,10 @@ private func makeInfo(_ asset: PHAsset) -> AssetInfo {
         pixelHeight: asset.pixelHeight,
         fileSize: size,
         isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
-        isVideo: asset.mediaType == .video
+        isVideo: asset.mediaType == .video,
+        isPanorama: asset.mediaSubtypes.contains(.photoPanorama),
+        isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
+        uti: uti
     )
 }
 
@@ -45,6 +56,14 @@ final class LibraryScanner: ObservableObject {
 
     /// 扫描结束后给用户的一句说明（例如"没有新照片"）
     @Published var lastMessage: String = ""
+
+    /// 缓存里的结果是用旧规则算的：必须重算，否则界面看起来"改了没用"。
+    @Published private(set) var needsRescan = false
+
+    /// 上一次分析完成的时间
+    var lastAnalyzedAt: Date? {
+        records.compactMap { $0.analyzedAt }.max()
+    }
 
     private let store = RecordStore()
 
@@ -68,10 +87,18 @@ final class LibraryScanner: ObservableObject {
     // MARK: 缓存
 
     func loadCache() {
-        if let saved = store.load() {
-            records = saved
-            groups = SimilarGrouper.group(saved)
-            phase = .finished
+        guard let saved = store.load() else { return }
+        records = saved
+        groups = SimilarGrouper.group(saved)
+        phase = .finished
+
+        // 规则版本变了：旧结果一律作废，标记为需要重扫。
+        // 这是"更新了版本但看起来没变"的根因，必须显式处理。
+        let stale = saved.contains { ($0.analyzerVersion ?? 0) < AnalyzerVersion.current }
+        needsRescan = stale
+        if stale {
+            lastMessage = "判定规则已升级到 v\(AnalyzerVersion.current)，"
+                + "当前 \(saved.count) 张结果是旧规则算的，需要重新分析才生效。"
         }
     }
 
@@ -152,7 +179,10 @@ final class LibraryScanner: ObservableObject {
         records = fresh
         store.save(fresh)
         groups = SimilarGrouper.group(fresh)
-        if !cancelFlag { phase = .finished }
+        if !cancelFlag {
+            needsRescan = false
+            phase = .finished
+        }
     }
 
     /// 并行分析一批。全部静态，不触碰 self，规避 actor 隔离问题。
@@ -195,7 +225,9 @@ final class LibraryScanner: ObservableObject {
             var resumed = false
             PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: CGSize(width: 1024, height: 1024),
+                // 1600 足够 Vision 做分类/人体/OCR，又不会让扫描慢到离谱。
+                // 之前用 1024，密集文字的照片文字覆盖率会被低估。
+                targetSize: CGSize(width: 1600, height: 1600),
                 contentMode: .aspectFit,
                 options: options
             ) { img, _ in

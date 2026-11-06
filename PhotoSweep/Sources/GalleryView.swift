@@ -388,6 +388,7 @@ struct DetailView: View {
 
                 scoreBlock
                 issueBlock
+                evidenceBlock
                 metricsBlock
                 categoryBlock
                 if !record.ocrText.isEmpty { ocrBlock }
@@ -627,6 +628,39 @@ extension DetailView {
             VStack(alignment: .leading, spacing: 8) {
                 Text("检出问题").font(.headline)
                 FlowChips(items: record.issues.map { ($0.rawValue, $0.symbol, Color.red) })
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    /// 判定依据：把"为什么是这一类"逐条摊开。
+    /// 自动分类一定有错，能解释自己结论的错，用户才改得动。
+    @ViewBuilder
+    private var evidenceBlock: some View {
+        if let ev = record.kindEvidence, !ev.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("为什么判成「\(record.kind.rawValue)」")
+                        .font(.headline)
+                    Spacer()
+                    Text(String(format: "%.0f%%", record.kindConfidence * 100))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(Array(ev.enumerated()), id: \.offset) { pair in
+                    Text("· " + pair.element)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let mk = record.manualKind {
+                    Text("已手动改判为「\(mk.rawValue)」，上面的自动判定仅供参考")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)

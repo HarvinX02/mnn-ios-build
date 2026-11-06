@@ -154,6 +154,13 @@ struct PhotoRecord: Codable, Identifiable, Hashable {
 
     var analyzedAt: Date
 
+    /// 判定依据：逐条记录"为什么判成这个题材"，详情页直接展示。
+    /// 自动分类不可能 100% 准，把依据摊开给用户看，比换个更花哨的模型有用。
+    var kindEvidence: [String]? = nil
+
+    /// 产生这条结果的规则版本。低于当前版本说明是旧缓存，必须重算。
+    var analyzerVersion: Int? = nil
+
     var megapixels: Double {
         Double(pixelWidth * pixelHeight) / 1_000_000.0
     }

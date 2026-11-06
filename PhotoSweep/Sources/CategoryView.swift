@@ -323,6 +323,31 @@ struct BucketDetail: View {
             }
             if selecting {
                 ToolbarItem(placement: .bottomBar) {
+                    // 批量改判：同类误判往往一起出现，一张张改太累
+                    Menu {
+                        Button {
+                            scanner.overrideKind(ids: Array(selection), to: nil)
+                            selection.removeAll()
+                            selecting = false
+                        } label: {
+                            Label("恢复自动判定", systemImage: "arrow.counterclockwise")
+                        }
+                        Divider()
+                        ForEach(PhotoKind.allCases) { k in
+                            Button {
+                                scanner.overrideKind(ids: Array(selection), to: k)
+                                selection.removeAll()
+                                selecting = false
+                            } label: {
+                                Label(k.rawValue, systemImage: k.symbol)
+                            }
+                        }
+                    } label: {
+                        Label("改判 \(selection.count) 张", systemImage: "pencil")
+                    }
+                    .disabled(selection.isEmpty)
+                }
+                ToolbarItem(placement: .bottomBar) {
                     Button(role: .destructive) {
                         pendingDelete = Array(selection)
                         showDeleteConfirm = true

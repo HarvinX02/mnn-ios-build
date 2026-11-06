@@ -1,13 +1,14 @@
 import Foundation
 import UIKit
 import Vision
+import ImageIO
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Accelerate
 
 /// 单张照片的完整分析器。
 /// 全部在本机完成：CoreImage 做基础统计，vImage 做拉普拉斯锐度，
-/// Vision 负责分类 / OCR / 人脸 / 特征指纹。
+/// Vision 负责分类 / 动物 / 人体 / 人脸 / OCR / 纸张 / 显著主体 / 特征指纹。
 final class PhotoAnalyzer {
 
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -26,30 +27,46 @@ final class PhotoAnalyzer {
         // 2) 拉普拉斯锐度
         let sharp = computeSharpness(cgImage: cgImage)
 
-        // 3) Vision 分类 + 人脸 + 指纹 + OCR
-        let vision = runVision(cgImage: cgImage, includeOCR: includeOCR)
+        // 3) Vision 多源特征
+        let vision = runVision(cgImage: cgImage,
+                               orientation: Self.cgOrientation(image.imageOrientation),
+                               includeOCR: includeOCR)
 
         let ratio = assetInfo.pixelHeight > 0
             ? Double(assetInfo.pixelWidth) / Double(assetInfo.pixelHeight)
             : 1.0
 
-        // 4) 题材判定 —— 决定用哪套评分标准
-        let (kind, kindConf) = KindClassifier.classify(
-            isScreenshot: assetInfo.isScreenshot,
-            categories: vision.categories,
-            topIdentifier: vision.topIdentifier,
-            faceCount: vision.faceCount,
-            ocrText: vision.ocrText,
-            brightness: stats.brightness,
-            contrast: stats.contrast,
-            colorfulness: stats.colorfulness,
-            pixelRatio: ratio,
-            sharpness: sharp
-        )
+        // 4) 组装证据集
+        var ev = PhotoEvidence()
+        ev.isScreenshot = assetInfo.isScreenshot
+        ev.isPanorama = assetInfo.isPanorama
+        ev.isPNG = assetInfo.isPNG
+        ev.isLivePhoto = assetInfo.isLivePhoto
+        ev.pixelRatio = ratio
+        ev.brightness = stats.brightness
+        ev.contrast = stats.contrast
+        ev.colorfulness = stats.colorfulness
+        ev.sharpness = sharp
+        ev.noise = stats.noise
+        ev.labels = vision.allLabels
+        ev.animalConf = vision.animalConf
+        ev.animalLabel = vision.animalLabel
+        ev.faceCount = vision.faceCount
+        ev.maxFaceArea = vision.maxFaceArea
+        ev.humanCount = vision.humanCount
+        ev.maxHumanArea = vision.maxHumanArea
+        ev.textCoverage = vision.textCoverage
+        ev.textLines = vision.textLines
+        ev.textHeightRatio = vision.textHeightRatio
+        ev.maxQuadArea = vision.maxQuadArea
+        ev.saliencyArea = vision.saliencyArea
 
-        // 5) 按题材加权评分 + 问题检出
+        // 5) 题材判定
+        let verdict = EvidenceClassifier.classify(ev)
+
+        // 6) 按题材加权评分 + 问题检出
         let scored = KindScorer.score(
-            kind: kind,
+            kind: verdict.kind,
             sharpness: sharp,
             brightness: stats.brightness,
             contrast: stats.contrast,
@@ -77,16 +94,30 @@ final class PhotoAnalyzer {
             tiltDegrees: 0,
             qualityScore: scored.score,
             grade: QualityGrade.from(score: scored.score),
-            kind: kind,
-            kindConfidence: kindConf,
+            kind: verdict.kind,
+            kindConfidence: verdict.confidence,
             issues: scored.issues,
             categories: cats,
             primaryCategory: primary,
             ocrText: vision.ocrText,
             faceCount: vision.faceCount,
             dhash: vision.dhash,
-            analyzedAt: Date()
+            analyzedAt: Date(),
+            kindEvidence: verdict.reasons + Self.extraEvidence(ev),
+            analyzerVersion: AnalyzerVersion.current
         )
+    }
+
+    /// 补充展示用证据（阈值判断之外，也让用户看到测量值本身）
+    private static func extraEvidence(_ e: PhotoEvidence) -> [String] {
+        var rows: [String] = []
+        rows.append("标签：\(e.topLabelsText.isEmpty ? "无" : e.topLabelsText)")
+        rows.append("动物 \(String(format: "%.2f", e.animalConf))、人体 \(e.humanCount)、"
+                    + "人脸 \(e.faceCount)、文字覆盖 \(String(format: "%.0f%%", e.textCoverage * 100))")
+        rows.append("显著主体 \(String(format: "%.0f%%", e.saliencyArea * 100))、"
+                    + "纸/屏 \(String(format: "%.0f%%", e.maxQuadArea * 100))、"
+                    + "噪点 \(String(format: "%.2f", e.noise))")
+        return rows
     }
 
     // MARK: - 亮度 / 对比度 / 色彩 / 噪点
@@ -130,7 +161,7 @@ final class PhotoAnalyzer {
         vDSP_meanvD(luma, 1, &mean, vDSP_Length(luma.count))
 
         var meanSq = 0.0
-        var sq = luma.map { $0 * $0 }
+        let sq = luma.map { $0 * $0 }
         vDSP_meanvD(sq, 1, &meanSq, vDSP_Length(sq.count))
         let std = sqrt(max(0, meanSq - mean * mean))
 
@@ -145,7 +176,7 @@ final class PhotoAnalyzer {
         vDSP_meanvD(rg, 1, &rgM, vDSP_Length(rg.count))
         vDSP_meanvD(yb, 1, &ybM, vDSP_Length(yb.count))
         var rgS = 0.0, ybS = 0.0
-        var rgSq = rg.map { $0 * $0 }, ybSq = yb.map { $0 * $0 }
+        let rgSq = rg.map { $0 * $0 }, ybSq = yb.map { $0 * $0 }
         vDSP_meanvD(rgSq, 1, &rgS, vDSP_Length(rgSq.count))
         vDSP_meanvD(ybSq, 1, &ybS, vDSP_Length(ybSq.count))
         let rgStd = sqrt(max(0, rgS - rgM * rgM))
@@ -172,7 +203,6 @@ final class PhotoAnalyzer {
 
         for y in stride(from: 1, to: h - 1, by: 2) {
             for x in stride(from: 1, to: w - 1, by: 2) {
-                // 3x3 均值
                 var sum = 0.0
                 for dy in -1...1 {
                     for dx in -1...1 {
@@ -181,7 +211,6 @@ final class PhotoAnalyzer {
                 }
                 let mean = sum / 9.0
 
-                // 局部方差：太大说明是纹理/边缘，不是噪声，跳过
                 var varSum = 0.0
                 for dy in -1...1 {
                     for dx in -1...1 {
@@ -200,10 +229,7 @@ final class PhotoAnalyzer {
         guard residuals.count > 40 else { return 0.05 }
 
         residuals.sort()
-        // 取中位数，抗异常值
         let median = residuals[residuals.count / 2]
-
-        // 经验映射：中位残差 0.002（干净）~ 0.030（很脏）
         let v = log10(1 + median * 1000) / log10(1 + 30)
         return clamp01(v)
     }
@@ -249,93 +275,210 @@ final class PhotoAnalyzer {
         var mean: Float = 0
         vDSP_meanv(response, 1, &mean, vDSP_Length(response.count))
         var meanSq: Float = 0
-        var sq = response.map { $0 * $0 }
+        let sq = response.map { $0 * $0 }
         vDSP_meanv(sq, 1, &meanSq, vDSP_Length(sq.count))
         let variance = max(0, meanSq - mean * mean)
 
-        // 经验映射：variance 0.0002(糊) ~ 0.02(锐)
         let v = Double(variance)
         let normalized = log10(1 + v * 5000) / log10(1 + 120)
         return clamp01(normalized)
     }
 
-    // MARK: - Vision
+    // MARK: - Vision 多源特征
 
     private struct VisionOut {
         var categories: [CategoryHit]
+        var allLabels: [(id: String, conf: Double)]
         var topIdentifier: String
         var ocrText: String
+        var textCoverage: Double
+        var textLines: Int
+        var textHeightRatio: Double
         var faceCount: Int
+        var maxFaceArea: Double
+        var humanCount: Int
+        var maxHumanArea: Double
+        var animalConf: Double
+        var animalLabel: String
+        var maxQuadArea: Double
+        var saliencyArea: Double
         var dhash: UInt64
     }
 
-    private func runVision(cgImage: CGImage, includeOCR: Bool) -> VisionOut {
+    private func runVision(cgImage: CGImage,
+                           orientation: CGImagePropertyOrientation,
+                           includeOCR: Bool) -> VisionOut {
+
         var cats: [CategoryHit] = []
+        var allLabels: [(id: String, conf: Double)] = []
         var topID = ""
         var ocr = ""
+        var textCoverage = 0.0
+        var textLines = 0
+        var textHeight = 0.0
         var faces = 0
+        var maxFaceArea = 0.0
+        var humans = 0
+        var maxHumanArea = 0.0
+        var animalConf = 0.0
+        var animalLabel = ""
+        var maxQuadArea = 0.0
+        var saliencyArea = 0.0
         var hash: UInt64 = 0
 
-        // --- 分类 ---
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+
+        // --- 1) 图像分类（保留全部中等以上标签，作为证据而不是结论）---
         let classify = VNClassifyImageRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         do {
             try handler.perform([classify])
             if let results = classify.results {
+                // 全部标签（证据用，门槛放很低）
+                for obs in results where obs.confidence > 0.08 {
+                    allLabels.append((id: obs.identifier, conf: Double(obs.confidence)))
+                    if allLabels.count >= 24 { break }
+                }
+                // 展示用的分类（门槛高一些，并按中文去重）
                 var seen = Set<String>()
-                // 置信度门槛提高到 0.20：
-                // 0.12 时噪声标签太多（钩织企鹅 -> bird、玩偶 -> toy、菜单 -> document），
-                // 这些弱标签会把题材判定带偏。0.20 只保留相对可信的标签。
-                for obs in results where obs.confidence > 0.20 {
-                    let label = obs.identifier
-                    let zh = CategoryMap.zh(for: label)
+                for l in allLabels where l.conf > 0.18 {
+                    let zh = CategoryMap.zh(for: l.id)
                     if zh == "其他" { continue }
                     if seen.contains(zh) { continue }
                     seen.insert(zh)
-                    cats.append(CategoryHit(label: label, zh: zh, confidence: Double(obs.confidence)))
-                    if topID.isEmpty { topID = label }
+                    cats.append(CategoryHit(label: l.id, zh: zh, confidence: l.conf))
                     if cats.count >= 5 { break }
+                }
+                if let top = allLabels.first { topID = top.id }
+            }
+        } catch { }
+
+        // --- 2) 动物识别：只认猫/狗，是"宠物"最可靠的证据 ---
+        let animalReq = VNRecognizeAnimalsRequest()
+        do {
+            try handler.perform([animalReq])
+            if let results = animalReq.results {
+                for obs in results {
+                    guard let best = obs.labels.first else { continue }
+                    if best.confidence > animalConf {
+                        animalConf = Double(best.confidence)
+                        animalLabel = best.identifier
+                    }
                 }
             }
         } catch { }
 
-        // --- OCR ---
+        // --- 3) 人脸（可能把猫/玩偶误检，所以只作辅助证据）---
+        let faceReq = VNDetectFaceRectanglesRequest()
+        do {
+            try handler.perform([faceReq])
+            if let results = faceReq.results {
+                faces = results.count
+                for f in results {
+                    let a = Double(f.boundingBox.width * f.boundingBox.height)
+                    if a > maxFaceArea { maxFaceArea = a }
+                }
+            }
+        } catch { }
+
+        // --- 4) 人体（真人检测，玩偶/雕像基本不触发）---
+        let humanReq = VNDetectHumanRectanglesRequest()
+        do {
+            try handler.perform([humanReq])
+            if let results = humanReq.results {
+                humans = results.count
+                for hb in results {
+                    let a = Double(hb.boundingBox.width * hb.boundingBox.height)
+                    if a > maxHumanArea { maxHumanArea = a }
+                }
+            }
+        } catch { }
+
+        // --- 5) OCR：除了文字内容，还要"文字占多大面积"---
+        //     这是区分"文档/截图"和"照片里有块招牌"的关键。
         if includeOCR {
             let ocrReq = VNRecognizeTextRequest()
             ocrReq.recognitionLevel = .accurate
             ocrReq.usesLanguageCorrection = false
             ocrReq.recognitionLanguages = ["zh-Hans", "en-US"]
-            let h2 = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {
-                try h2.perform([ocrReq])
+                try handler.perform([ocrReq])
                 if let obs = ocrReq.results {
                     let lines = obs.compactMap { $0.topCandidates(1).first?.string }
                     ocr = lines.joined(separator: " ")
-                    if ocr.count > 300 { ocr = String(ocr.prefix(300)) }
+                    if ocr.count > 400 { ocr = String(ocr.prefix(400)) }
+
+                    textLines = obs.count
+                    var area = 0.0
+                    var hSum = 0.0
+                    for o in obs {
+                        let bb = o.boundingBox
+                        area += Double(bb.width * bb.height)
+                        hSum += Double(bb.height)
+                    }
+                    textCoverage = min(1.0, area)
+                    if !obs.isEmpty { textHeight = hSum / Double(obs.count) }
                 }
             } catch { }
         }
 
-        // --- 人脸 ---
-        let faceReq = VNDetectFaceRectanglesRequest()
-        let h3 = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        // --- 6) 纸张/屏幕四边形：整块纸、整块屏幕 ---
+        let rectReq = VNDetectRectanglesRequest()
+        rectReq.maximumObservations = 5
+        rectReq.minimumConfidence = 0.35
+        rectReq.minimumSize = 0.15
+        rectReq.minimumAspectRatio = 0.1
+        rectReq.quadratureTolerance = 40
         do {
-            try h3.perform([faceReq])
-            faces = faceReq.results?.count ?? 0
+            try handler.perform([rectReq])
+            if let results = rectReq.results {
+                for q in results {
+                    let a = Double(q.boundingBox.width * q.boundingBox.height)
+                    if a > maxQuadArea { maxQuadArea = a }
+                }
+            }
         } catch { }
 
-        // --- 特征指纹（用于找相似/连拍） ---
-        let feat = VNGenerateImageFeaturePrintRequest()
-        let h4 = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        // --- 7) 显著主体：判断是不是"一个居中的特写"---
+        let salReq = VNGenerateAttentionBasedSaliencyImageRequest()
         do {
-            try h4.perform([feat])
+            try handler.perform([salReq])
+            if let obs = salReq.results?.first,
+               let objects = obs.salientObjects {
+                var area = 0.0
+                for o in objects {
+                    area += Double(o.boundingBox.width * o.boundingBox.height)
+                }
+                saliencyArea = min(1.0, area)
+            }
+        } catch { }
+
+        // --- 8) 特征指纹（用于找相似/连拍）---
+        let feat = VNGenerateImageFeaturePrintRequest()
+        do {
+            try handler.perform([feat])
             if let r = feat.results?.first {
                 hash = Self.foldFeaturePrint(r)
             }
         } catch { }
 
-        return VisionOut(categories: cats, topIdentifier: topID,
-                         ocrText: ocr, faceCount: faces, dhash: hash)
+        return VisionOut(
+            categories: cats,
+            allLabels: allLabels,
+            topIdentifier: topID,
+            ocrText: ocr,
+            textCoverage: textCoverage,
+            textLines: textLines,
+            textHeightRatio: textHeight,
+            faceCount: faces,
+            maxFaceArea: maxFaceArea,
+            humanCount: humans,
+            maxHumanArea: maxHumanArea,
+            animalConf: animalConf,
+            animalLabel: animalLabel,
+            maxQuadArea: maxQuadArea,
+            saliencyArea: saliencyArea,
+            dhash: hash
+        )
     }
 
     /// 把 featurePrint 的浮点向量压成一个 64 位摘要，供快速近似比较。
@@ -347,12 +490,27 @@ final class PhotoAnalyzer {
         data.withUnsafeBytes { raw in
             let floats = raw.bindMemory(to: Float.self)
             for i in 0..<count {
-                let v = floats[i]
-                let bits = v.bitPattern
+                let bits = floats[i].bitPattern
                 acc = (acc ^ UInt64(bits)) &* 0x100000001b3
             }
         }
         return acc
+    }
+
+    /// UIImage 的朝向 -> Vision 需要的 CGImagePropertyOrientation。
+    /// 之前直接用 cgImage 分析，竖拍照片在 Vision 里是躺倒的，OCR 基本失效。
+    private static func cgOrientation(_ o: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch o {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        case .upMirrored: return .upMirrored
+        case .downMirrored: return .downMirrored
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
     }
 
     // MARK: - 工具
