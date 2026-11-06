@@ -1,0 +1,85 @@
+name: Build PhotoSweep IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'PhotoSweep/**'
+      - '.github/workflows/photosweep.yml'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Show versions
+        run: |
+          xcodebuild -version
+          xcodegen --version
+          sw_vers
+
+      - name: Generate Xcode project
+        working-directory: PhotoSweep
+        run: |
+          xcodegen generate
+          ls -la
+
+      - name: Build unsigned app
+        working-directory: PhotoSweep
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PhotoSweep.xcodeproj \
+            -scheme PhotoSweep \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log | tail -80
+
+      - name: Show errors if failed
+        if: failure()
+        working-directory: PhotoSweep
+        run: |
+          echo "===== errors ====="
+          grep -E "error:|warning: .*deprecat" build.log | head -60 || true
+
+      - name: Package IPA
+        working-directory: PhotoSweep
+        run: |
+          set -euo pipefail
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "APP=$APP"
+          [ -d "$APP" ] || { echo "::error::app 未生成"; exit 1; }
+          du -sh "$APP"
+          rm -rf Payload PhotoSweep.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          rm -rf "Payload/$(basename "$APP")/_CodeSignature"
+          find "Payload/$(basename "$APP")" -name "*.xcent" -delete || true
+          zip -qry PhotoSweep.ipa Payload
+          ls -lh PhotoSweep.ipa
+          shasum -a 256 PhotoSweep.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoSweep-ipa
+          path: PhotoSweep/PhotoSweep.ipa
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: PhotoSweep/build.log
+          retention-days: 7
+          if-no-files-found: ignore

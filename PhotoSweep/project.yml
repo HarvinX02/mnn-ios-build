@@ -1,0 +1,46 @@
+name: PhotoSweep
+options:
+  bundleIdPrefix: com.harvinx
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  minimumXcodeGenVersion: "2.35.0"
+
+targets:
+  PhotoSweep:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - "Info.plist"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: 照片清扫
+        CFBundleName: PhotoSweep
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarStyle: UIStatusBarStyleDefault
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSPhotoLibraryUsageDescription: 需要读取相册，以便批量分析照片的清晰度、曝光与内容分类。所有分析均在本机完成，不会上传任何照片。
+        NSPhotoLibraryAddUsageDescription: 需要修改相册，以便删除你确认过的低质量照片。
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.harvinx.photosweep
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        SWIFT_OPTIMIZATION_LEVEL: "-O"
+        SWIFT_COMPILATION_MODE: wholemodule
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+        CLANG_ENABLE_MODULES: "YES"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: "YES"
