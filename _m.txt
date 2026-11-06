@@ -1,8 +1,6 @@
-﻿feat: 导出判定诊断数据（定位误判用）
+﻿ci: 清理旧的自动签名证书，避免撞上 Apple 证书上限
 
-- Models：新增 FeatureSnapshot / LabelScore，每条结果保留判定时的测量值
-- PhotoRecord 增加 feats 字段（动物分、人体数、文字覆盖、显著主体、标签）
-- Diagnostics：把全部结果打包成 JSON，含版本号/规则版本/机型，不含照片与 OCR 原文
-- 扫描页新增「分类还是不对？」卡片：一键生成 + 系统分享
-- 详情页新增「复制这张的判定数据」
-- 规则版本升到 v4，装新包后自动全量重扫
+每次 -allowProvisioningUpdates 都会在干净 runner 上申请新证书，私钥随 runner
+销毁，长期累积会触发 "Your account has reached the maximum number of
+certificates"，让 Archive 直接失败。加一个 always() 步骤删除 3 天前的
+"Created via API" 证书，并容忍失败以免影响主流程。

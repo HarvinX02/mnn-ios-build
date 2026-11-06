@@ -1,4 +1,4 @@
-name: PhotoSweep TestFlight
+﻿name: PhotoSweep TestFlight
 
 # 用 App Store Connect API Key 自动创建分发证书 + 描述文件，
 # Archive 后通过 altool 直传 TestFlight，不需要手动导 p12/mobileprovision。
@@ -210,6 +210,23 @@ jobs:
           "$RUNNER_TEMP/ascvenv/bin/python" PhotoSweep/ci/assign_testflight.py \
             --build-number "$BUILD_NUM" \
             --whats-new "$WHATS_NEW"
+
+      # 每次自动签名都会在干净 runner 上申请一张新证书，密钥随即丢失，
+      # 长期累积会撞上 Apple 的证书上限导致后面所有构建失败。这里顺手清理旧证书。
+      - name: Prune stale signing certificates
+        if: always()
+        continue-on-error: true
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -uo pipefail
+          if [ ! -x "$RUNNER_TEMP/ascvenv/bin/python" ]; then
+            python3 -m venv "$RUNNER_TEMP/ascvenv"
+            "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt cryptography
+          fi
+          "$RUNNER_TEMP/ascvenv/bin/python" PhotoSweep/ci/prune_certs.py || true
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
