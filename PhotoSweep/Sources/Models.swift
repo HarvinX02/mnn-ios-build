@@ -1,5 +1,28 @@
 import Foundation
 
+// MARK: - 判定证据快照（供诊断导出）
+
+struct LabelScore: Codable, Hashable {
+    let id: String
+    let conf: Double
+}
+
+/// 判定时的原始测量值。只用于诊断：出问题时能看清"到底哪一项错了"，
+/// 而不是只能看到一句"判错了"。
+struct FeatureSnapshot: Codable, Hashable {
+    var animal = 0.0
+    var animalLabel = ""
+    var faces = 0
+    var faceArea = 0.0
+    var humans = 0
+    var textCoverage = 0.0
+    var textLines = 0
+    var quad = 0.0
+    var saliency = 0.0
+    var png = false
+    var labels: [LabelScore] = []
+}
+
 // MARK: - 分类命中
 
 struct CategoryHit: Codable, Hashable {
@@ -160,6 +183,9 @@ struct PhotoRecord: Codable, Identifiable, Hashable {
 
     /// 产生这条结果的规则版本。低于当前版本说明是旧缓存，必须重算。
     var analyzerVersion: Int? = nil
+
+    /// 判定时的测量值快照（导出诊断用）
+    var feats: FeatureSnapshot? = nil
 
     var megapixels: Double {
         Double(pixelWidth * pixelHeight) / 1_000_000.0

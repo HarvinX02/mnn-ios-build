@@ -6,7 +6,7 @@ import Foundation
 /// 只要改动这里的逻辑或 PhotoAnalyzer 提取的特征，就必须 +1。
 /// 否则手机上会一直显示旧缓存的结果，看起来像"改了没用"。
 enum AnalyzerVersion {
-    static let current = 3
+    static let current = 4
 }
 
 // MARK: - 证据集

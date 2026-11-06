@@ -48,6 +48,7 @@ struct RootView: View {
 struct ScanView: View {
     @EnvironmentObject var scanner: LibraryScanner
     @State private var enableOCR = true
+    @State private var diagURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -57,12 +58,52 @@ struct ScanView: View {
                     actionCard
                     statsCard
                     if !scanner.groups.isEmpty { similarHint }
+                    diagCard
                 }
                 .padding()
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("照片清扫")
         }
+    }
+
+    /// 分类还是不对时，把判定数据导出来。
+    /// 只有数值和 Vision 标签，没有照片、没有 OCR 原文。
+    private var diagCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("分类还是不对？")
+                .font(.headline)
+            Text("导出一份判定数据发我。里面只有每张照片的测量值和标签，不含照片、不含文字内容。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button {
+                    diagURL = Diagnostics.writeFile(scanner.records)
+                } label: {
+                    Label("生成诊断文件", systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .disabled(scanner.records.isEmpty)
+
+                if let url = diagURL {
+                    ShareLink(item: url) {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            if diagURL != nil {
+                Text("已生成：点「分享」→ 存到「文件」或直接发给我。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var headerCard: some View {

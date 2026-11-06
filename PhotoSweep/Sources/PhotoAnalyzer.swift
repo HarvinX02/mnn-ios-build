@@ -78,7 +78,7 @@ final class PhotoAnalyzer {
         let cats = vision.categories
         let primary = cats.first?.zh ?? CategoryMap.zh(for: vision.topIdentifier)
 
-        return PhotoRecord(
+        var record = PhotoRecord(
             id: assetInfo.id,
             creationDate: assetInfo.creationDate,
             pixelWidth: assetInfo.pixelWidth,
@@ -106,6 +106,23 @@ final class PhotoAnalyzer {
             kindEvidence: verdict.reasons + Self.extraEvidence(ev),
             analyzerVersion: AnalyzerVersion.current
         )
+
+        // 保留测量值快照：出问题时可以导出，定位到底是哪一项判据失效。
+        // 只存数值和标签，不存照片、不存 OCR 原文。
+        record.feats = FeatureSnapshot(
+            animal: ev.animalConf,
+            animalLabel: ev.animalLabel,
+            faces: ev.faceCount,
+            faceArea: ev.maxFaceArea,
+            humans: ev.humanCount,
+            textCoverage: ev.textCoverage,
+            textLines: ev.textLines,
+            quad: ev.maxQuadArea,
+            saliency: ev.saliencyArea,
+            png: ev.isPNG,
+            labels: ev.labels.prefix(12).map { LabelScore(id: $0.id, conf: $0.conf) }
+        )
+        return record
     }
 
     /// 补充展示用证据（阈值判断之外，也让用户看到测量值本身）

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Photos
 
 // MARK: - 缩略图缓存
@@ -353,6 +354,7 @@ struct DetailView: View {
 
     @State private var img: UIImage?
     @State private var showFullscreen = false
+    @State private var copied = false
 
     var body: some View {
         ScrollView {
@@ -661,6 +663,18 @@ extension DetailView {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+
+                // 判错时把这张的判定数据复制出来发我，能直接定位是哪条判据失效
+                Button {
+                    UIPasteboard.general.string = Diagnostics.text(for: record)
+                    copied = true
+                } label: {
+                    Label(copied ? "已复制，可以粘贴发送" : "复制这张的判定数据",
+                          systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(copied ? .green : Color.accentColor)
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
