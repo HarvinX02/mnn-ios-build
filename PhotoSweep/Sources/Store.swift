@@ -6,7 +6,8 @@ final class RecordStore {
 
     private var url: URL {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("photosweep_records.json")
+        // v2：评分模型改为分题材后，旧缓存没有 kind/issues 字段，直接换文件名丢弃
+        return dir.appendingPathComponent("photosweep_records_v2.json")
     }
 
     func save(_ records: [PhotoRecord]) {

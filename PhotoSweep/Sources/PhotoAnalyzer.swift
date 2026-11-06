@@ -12,35 +12,49 @@ final class PhotoAnalyzer {
 
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    // 分析用的工作尺寸。太大慢，太小锐度判断失真。
-    private let workSize = CGSize(width: 512, height: 512)
-
     // MARK: - 主入口
 
-    /// 分析一张图。返回 nil 表示无法解码。
     func analyze(image: UIImage,
                  assetInfo: AssetInfo,
                  includeOCR: Bool) -> PhotoRecord? {
 
         guard let cgImage = image.cgImage else { return nil }
 
-        // 1) 基础统计（亮度 / 对比度 / 色彩丰富度）
+        // 1) 基础统计（亮度 / 对比度 / 色彩 / 噪点）
         let stats = computeStats(cgImage: cgImage)
 
         // 2) 拉普拉斯锐度
         let sharp = computeSharpness(cgImage: cgImage)
 
-        // 3) Vision 分类 + 人脸 + 指纹
+        // 3) Vision 分类 + 人脸 + 指纹 + OCR
         let vision = runVision(cgImage: cgImage, includeOCR: includeOCR)
 
-        // 4) 综合评分
-        let score = combineScore(
-            sharpness: sharp,
-            exposure: stats.brightness,
+        let ratio = assetInfo.pixelHeight > 0
+            ? Double(assetInfo.pixelWidth) / Double(assetInfo.pixelHeight)
+            : 1.0
+
+        // 4) 题材判定 —— 决定用哪套评分标准
+        let (kind, kindConf) = KindClassifier.classify(
+            isScreenshot: assetInfo.isScreenshot,
+            categories: vision.categories,
+            topIdentifier: vision.topIdentifier,
+            faceCount: vision.faceCount,
+            ocrText: vision.ocrText,
+            brightness: stats.brightness,
             contrast: stats.contrast,
             colorfulness: stats.colorfulness,
-            megapixels: assetInfo.megapixels,
-            isScreenshot: assetInfo.isScreenshot
+            pixelRatio: ratio
+        )
+
+        // 5) 按题材加权评分 + 问题检出
+        let scored = KindScorer.score(
+            kind: kind,
+            sharpness: sharp,
+            brightness: stats.brightness,
+            contrast: stats.contrast,
+            colorfulness: stats.colorfulness,
+            noise: stats.noise,
+            megapixels: assetInfo.megapixels
         )
 
         let cats = vision.categories
@@ -58,8 +72,13 @@ final class PhotoAnalyzer {
             exposure: stats.brightness,
             contrast: stats.contrast,
             colorfulness: stats.colorfulness,
-            qualityScore: score,
-            grade: QualityGrade.from(score: score),
+            noise: stats.noise,
+            tiltDegrees: 0,
+            qualityScore: scored.score,
+            grade: QualityGrade.from(score: scored.score),
+            kind: kind,
+            kindConfidence: kindConf,
+            issues: scored.issues,
             categories: cats,
             primaryCategory: primary,
             ocrText: vision.ocrText,
@@ -69,17 +88,17 @@ final class PhotoAnalyzer {
         )
     }
 
-    // MARK: - 亮度 / 对比度 / 色彩
+    // MARK: - 亮度 / 对比度 / 色彩 / 噪点
 
     private struct Stats {
         var brightness: Double
         var contrast: Double
         var colorfulness: Double
+        var noise: Double
     }
 
     private func computeStats(cgImage: CGImage) -> Stats {
-        // 缩到 64x64 做直方图统计即可
-        let w = 64, h = 64
+        let w = 96, h = 96
         var buf = [UInt8](repeating: 0, count: w * h * 4)
         guard let ctx = CGContext(data: &buf,
                                   width: w, height: h,
@@ -88,9 +107,9 @@ final class PhotoAnalyzer {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else {
-            return Stats(brightness: 0.5, contrast: 0.5, colorfulness: 0.5)
+            return Stats(brightness: 0.5, contrast: 0.5, colorfulness: 0.5, noise: 0.1)
         }
-        ctx.interpolationQuality = .low
+        ctx.interpolationQuality = .medium
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
 
         var luma = [Double](repeating: 0, count: w * h)
@@ -106,11 +125,9 @@ final class PhotoAnalyzer {
             luma[i] = 0.299 * r + 0.587 * g + 0.114 * b
         }
 
-        // 亮度均值
         var mean = 0.0
         vDSP_meanvD(luma, 1, &mean, vDSP_Length(luma.count))
 
-        // 亮度标准差 = 对比度
         var meanSq = 0.0
         var sq = luma.map { $0 * $0 }
         vDSP_meanvD(sq, 1, &meanSq, vDSP_Length(sq.count))
@@ -134,17 +151,65 @@ final class PhotoAnalyzer {
         let ybStd = sqrt(max(0, ybS - ybM * ybM))
         let colorful = sqrt(rgStd * rgStd + ybStd * ybStd) + 0.3 * sqrt(rgM * rgM + ybM * ybM)
 
+        // 噪点估计：用"高频残差"近似。
+        // 做法：3x3 均值滤波后与原图求差，平坦区域（本身没有结构）的差值就近似噪声。
+        let noise = estimateNoise(luma: luma, w: w, h: h)
+
         return Stats(
             brightness: clamp01(mean),
-            contrast: clamp01(std * 2.2),          // 经验系数
-            colorfulness: clamp01(colorful * 2.4)
+            contrast: clamp01(std * 2.2),
+            colorfulness: clamp01(colorful * 2.4),
+            noise: noise
         )
+    }
+
+    /// 高通残差法估噪点。
+    /// 只在"局部本身很平坦"的块上统计，避免把真实纹理当成噪声。
+    private func estimateNoise(luma: [Double], w: Int, h: Int) -> Double {
+        var residuals: [Double] = []
+        residuals.reserveCapacity((w - 2) * (h - 2) / 4)
+
+        for y in stride(from: 1, to: h - 1, by: 2) {
+            for x in stride(from: 1, to: w - 1, by: 2) {
+                // 3x3 均值
+                var sum = 0.0
+                for dy in -1...1 {
+                    for dx in -1...1 {
+                        sum += luma[(y + dy) * w + (x + dx)]
+                    }
+                }
+                let mean = sum / 9.0
+
+                // 局部方差：太大说明是纹理/边缘，不是噪声，跳过
+                var varSum = 0.0
+                for dy in -1...1 {
+                    for dx in -1...1 {
+                        let d = luma[(y + dy) * w + (x + dx)] - mean
+                        varSum += d * d
+                    }
+                }
+                let localVar = varSum / 9.0
+                if localVar > 0.0009 { continue }   // 有结构，不计入
+
+                let center = luma[y * w + x]
+                residuals.append(abs(center - mean))
+            }
+        }
+
+        guard residuals.count > 40 else { return 0.05 }
+
+        residuals.sort()
+        // 取中位数，抗异常值
+        let median = residuals[residuals.count / 2]
+
+        // 经验映射：中位残差 0.002（干净）~ 0.030（很脏）
+        let v = log10(1 + median * 1000) / log10(1 + 30)
+        return clamp01(v)
     }
 
     // MARK: - 拉普拉斯锐度
 
     /// 对灰度图做 3x3 拉普拉斯卷积，取方差。方差越大越锐利。
-    /// 这是判断"糊没糊"的工业标准做法，比任何 VLM 都准且快。
     private func computeSharpness(cgImage: CGImage) -> Double {
         let w = 256, h = 256
         var gray = [UInt8](repeating: 0, count: w * h)
@@ -161,7 +226,6 @@ final class PhotoAnalyzer {
         var src = [Float](repeating: 0, count: w * h)
         for i in 0..<(w * h) { src[i] = Float(gray[i]) / 255.0 }
 
-        // 拉普拉斯核
         let kernel: [Float] = [0, 1, 0,
                                1, -4, 1,
                                0, 1, 0]
@@ -189,7 +253,6 @@ final class PhotoAnalyzer {
         let variance = max(0, meanSq - mean * mean)
 
         // 经验映射：variance 0.0002(糊) ~ 0.02(锐)
-        // 用对数刻度更符合人眼感受
         let v = Double(variance)
         let normalized = log10(1 + v * 5000) / log10(1 + 120)
         return clamp01(normalized)
@@ -218,7 +281,6 @@ final class PhotoAnalyzer {
         do {
             try handler.perform([classify])
             if let results = classify.results {
-                // 取置信度最高的若干项，按中文去重
                 var seen = Set<String>()
                 for obs in results where obs.confidence > 0.12 {
                     let label = obs.identifier
@@ -273,7 +335,6 @@ final class PhotoAnalyzer {
     }
 
     /// 把 featurePrint 的浮点向量压成一个 64 位摘要，供快速近似比较。
-    /// 注意：这是粗筛手段，精确相似度仍应使用 VNFeaturePrintObservation.computeDistance。
     private static func foldFeaturePrint(_ obs: VNFeaturePrintObservation) -> UInt64 {
         let data = obs.data
         let count = data.count / MemoryLayout<Float>.size
@@ -288,43 +349,6 @@ final class PhotoAnalyzer {
             }
         }
         return acc
-    }
-
-    // MARK: - 综合评分
-
-    /// 权重设计：
-    ///   锐度 45%（最影响观感）
-    ///   曝光 20%（过曝/欠曝）
-    ///   对比 12%
-    ///   色彩 13%
-    ///   分辨率 10%
-    /// 截图额外降分（一般不需要保留）
-    private func combineScore(sharpness: Double,
-                              exposure: Double,
-                              contrast: Double,
-                              colorfulness: Double,
-                              megapixels: Double,
-                              isScreenshot: Bool) -> Double {
-        // 曝光最优区间 0.35~0.7，两端衰减
-        let expScore: Double
-        if exposure < 0.35 {
-            expScore = exposure / 0.35
-        } else if exposure > 0.7 {
-            expScore = max(0, 1 - (exposure - 0.7) / 0.3)
-        } else {
-            expScore = 1.0
-        }
-
-        let mpScore = min(1.0, megapixels / 12.0)
-
-        var s = sharpness * 0.45
-              + expScore * 0.20
-              + contrast * 0.12
-              + colorfulness * 0.13
-              + mpScore * 0.10
-
-        if isScreenshot { s *= 0.55 }
-        return clamp01(s)
     }
 
     // MARK: - 工具

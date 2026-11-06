@@ -91,7 +91,9 @@ struct GalleryView: View {
 
     @State private var sort: SortKey = .worst
     @State private var gradeFilter: QualityGrade? = nil
+    @State private var kindFilter: PhotoKind? = nil
     @State private var categoryFilter: String? = nil
+    @State private var issueFilter: PhotoIssue? = nil
     @State private var search = ""
     @State private var onlyScreenshots = false
     @State private var selection = Set<String>()
@@ -101,11 +103,17 @@ struct GalleryView: View {
     private var filtered: [PhotoRecord] {
         var list = scanner.records
 
+        if let k = kindFilter {
+            list = list.filter { $0.kind == k }
+        }
         if let g = gradeFilter {
             list = list.filter { $0.grade == g }
         }
         if let c = categoryFilter {
             list = list.filter { $0.primaryCategory == c }
+        }
+        if let iss = issueFilter {
+            list = list.filter { $0.issues.contains(iss) }
         }
         if onlyScreenshots {
             list = list.filter { $0.isScreenshot }
@@ -115,9 +123,19 @@ struct GalleryView: View {
             list = list.filter { $0.searchBlob.contains(q) }
         }
 
+        // 排序：先按题材分组时，分数才有可比性。
+        // 这里做的是"同类内比较"——同题材的照片排在一起，组内按分数。
         switch sort {
-        case .worst:   list.sort { $0.qualityScore < $1.qualityScore }
-        case .best:    list.sort { $0.qualityScore > $1.qualityScore }
+        case .worst:
+            list.sort {
+                if $0.kind != $1.kind { return $0.kind.rawValue < $1.kind.rawValue }
+                return $0.qualityScore < $1.qualityScore
+            }
+        case .best:
+            list.sort {
+                if $0.kind != $1.kind { return $0.kind.rawValue < $1.kind.rawValue }
+                return $0.qualityScore > $1.qualityScore
+            }
         case .newest:  list.sort { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
         case .oldest:  list.sort { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
         case .largest: list.sort { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
@@ -125,10 +143,24 @@ struct GalleryView: View {
         return list
     }
 
+    private var allKinds: [(PhotoKind, Int)] {
+        var counter: [PhotoKind: Int] = [:]
+        for r in scanner.records { counter[r.kind, default: 0] += 1 }
+        return counter.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }
+    }
+
     private var allCategories: [String] {
         var set = Set<String>()
         for r in scanner.records { set.insert(r.primaryCategory) }
         return set.sorted()
+    }
+
+    private var allIssues: [(PhotoIssue, Int)] {
+        var counter: [PhotoIssue: Int] = [:]
+        for r in scanner.records {
+            for i in r.issues { counter[i, default: 0] += 1 }
+        }
+        return counter.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }
     }
 
     private let cols = [GridItem(.adaptive(minimum: 108), spacing: 4)]
@@ -163,11 +195,27 @@ struct GalleryView: View {
                                 }
                             }
                         }
-                        Section("质量") {
+                        Section("题材（同类内比较）") {
+                            Picker("题材", selection: $kindFilter) {
+                                Text("全部").tag(PhotoKind?.none)
+                                ForEach(allKinds, id: \.0) { k, n in
+                                    Text("\(k.rawValue) (\(n))").tag(PhotoKind?.some(k))
+                                }
+                            }
+                        }
+                        Section("本类质量") {
                             Picker("质量", selection: $gradeFilter) {
                                 Text("全部").tag(QualityGrade?.none)
                                 ForEach(QualityGrade.allCases) { g in
                                     Text(g.rawValue).tag(QualityGrade?.some(g))
+                                }
+                            }
+                        }
+                        Section("问题") {
+                            Picker("问题", selection: $issueFilter) {
+                                Text("全部").tag(PhotoIssue?.none)
+                                ForEach(allIssues, id: \.0) { iss, n in
+                                    Text("\(iss.rawValue) (\(n))").tag(PhotoIssue?.some(iss))
                                 }
                             }
                         }
@@ -317,6 +365,7 @@ struct DetailView: View {
                 .disabled(img == nil)
 
                 scoreBlock
+                issueBlock
                 metricsBlock
                 categoryBlock
                 if !record.ocrText.isEmpty { ocrBlock }
@@ -474,18 +523,23 @@ extension DetailView {
             }
             .frame(width: 84, height: 84)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
+                // 明确标注：这是"在同类里的分数"
+                HStack(spacing: 4) {
+                    Image(systemName: record.kind.symbol)
+                    Text(record.kind.rawValue)
+                }
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.12), in: Capsule())
+
                 Label(record.grade.rawValue, systemImage: record.grade.symbol)
                     .font(.headline)
                     .foregroundStyle(scoreColor)
-                Text("\(record.primaryCategory) · \(record.aspectLabel)幅")
-                    .font(.subheadline)
+
+                Text("按「\(record.kind.rawValue)」标准评分 · \(record.aspectLabel)幅")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                if record.isScreenshot {
-                    Text("截图").font(.caption)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Color.orange.opacity(0.15), in: Capsule())
-                }
             }
             Spacer()
         }
@@ -500,27 +554,55 @@ extension DetailView {
         }
     }
 
+    /// 问题清单：告诉用户"哪里不行"，而不是只给一个数字
+    @ViewBuilder
+    private var issueBlock: some View {
+        if !record.issues.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("检出问题").font(.headline)
+                FlowChips(items: record.issues.map { ($0.rawValue, $0.symbol, Color.red) })
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
     private var metricsBlock: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("画质指标").font(.headline)
-            metric("清晰度", record.sharpness)
-            metric("曝光", record.exposure)
+            Text("原始指标").font(.headline)
+            Text("以下是物理测量值，不代表好坏，需结合题材判断")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            metric("清晰度", record.sharpness,
+                   note: "≥\(String(format: "%.0f", KindScorer.sharpnessFloor(for: record.kind) * 100)) 达标")
+            metric("曝光", record.exposure,
+                   note: exposureNote)
             metric("对比度", record.contrast)
             metric("色彩", record.colorfulness)
+            metric("噪点", record.noise)
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func metric(_ name: String, _ v: Double) -> some View {
-        HStack(spacing: 10) {
-            Text(name)
-                .font(.subheadline)
-                .frame(width: 48, alignment: .leading)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color(.tertiarySystemFill))
+    private var exposureNote: String {
+        let win = KindScorer.exposureWindow(for: record.kind)
+        if record.kind == .screenshot { return "不参与评分" }
+        return "合理区间 \(Int(win.low * 100))–\(Int(win.high * 100))"
+    }
+
+    private func metric(_ name: String, _ v: Double, note: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                Text(name)
+                    .font(.subheadline)
+                    .frame(width: 48, alignment: .leading)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color(.tertiarySystemFill))
                     Capsule()
                         .fill(barColor(v))
                         .frame(width: geo.size.width * CGFloat(min(1, v)))
@@ -531,6 +613,13 @@ extension DetailView {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 38, alignment: .trailing)
+            }
+            if let note {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 58)
+            }
         }
     }
 
@@ -606,18 +695,28 @@ extension DetailView {
 // MARK: - 流式标签布局
 
 struct FlowChips: View {
+    /// 纯文本 chip
     let items: [String]
+
+    /// 带图标和颜色的 chip（用于问题清单）
+    var detailed: [(text: String, symbol: String, color: Color)]? = nil
+
+    init(items: [String]) {
+        self.items = items
+        self.detailed = nil
+    }
+
+    init(items: [(String, String, Color)]) {
+        self.items = items.map { $0.0 }
+        self.detailed = items
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(chunked(), id: \.self) { row in
+            ForEach(Array(chunked().enumerated()), id: \.offset) { _, row in
                 HStack(spacing: 6) {
-                    ForEach(row, id: \.self) { t in
-                        Text(t)
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, t in
+                        chip(t)
                     }
                     Spacer(minLength: 0)
                 }
@@ -625,7 +724,27 @@ struct FlowChips: View {
         }
     }
 
-    /// 简单两列分组，避免引第三方流式布局
+    @ViewBuilder
+    private func chip(_ text: String) -> some View {
+        if let d = detailed, let hit = d.first(where: { $0.text == text }) {
+            HStack(spacing: 3) {
+                Image(systemName: hit.symbol).font(.caption2)
+                Text(text).font(.caption)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(hit.color.opacity(0.12), in: Capsule())
+            .foregroundStyle(hit.color)
+        } else {
+            Text(text)
+                .font(.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.accentColor.opacity(0.12), in: Capsule())
+        }
+    }
+
+    /// 简单两列分组，避免引入第三方流式布局
     private func chunked() -> [[String]] {
         var out: [[String]] = []
         var cur: [String] = []

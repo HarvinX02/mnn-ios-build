@@ -132,18 +132,56 @@ struct ScanView: View {
                 StatTile(title: "相似组",
                          value: "\(scanner.groups.count)",
                          unit: "组")
-                StatTile(title: "较差",
-                         value: "\(scanner.records.filter { $0.grade == .poor }.count)",
+                StatTile(title: "有缺陷",
+                         value: "\(scanner.records.filter { !$0.issues.isEmpty }.count)",
                          unit: "张")
             }
 
             if !scanner.records.isEmpty {
                 Divider()
+                Text("各类题材分布")
+                    .font(.subheadline.weight(.medium))
+                kindBar
+                Divider()
+                Text("本类质量分布")
+                    .font(.subheadline.weight(.medium))
                 gradeBar
             }
         }
         .padding()
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// 题材分布：让你直接看到相册构成，而不是一个笼统的总分
+    private var kindBar: some View {
+        let total = max(1, scanner.records.count)
+        var counter: [PhotoKind: Int] = [:]
+        for r in scanner.records { counter[r.kind, default: 0] += 1 }
+        let rows = counter.sorted { $0.value > $1.value }
+        return VStack(alignment: .leading, spacing: 5) {
+            ForEach(rows, id: \.key) { kind, n in
+                HStack(spacing: 8) {
+                    HStack(spacing: 3) {
+                        Image(systemName: kind.symbol).font(.caption2)
+                        Text(kind.rawValue).font(.caption)
+                    }
+                    .frame(width: 66, alignment: .leading)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color(.tertiarySystemFill))
+                            Capsule()
+                                .fill(Color.accentColor.opacity(0.75))
+                                .frame(width: geo.size.width * CGFloat(n) / CGFloat(total))
+                        }
+                    }
+                    .frame(height: 8)
+                    Text("\(n)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, alignment: .trailing)
+                }
+            }
+        }
     }
 
     private var gradeBar: some View {
