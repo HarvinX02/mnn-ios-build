@@ -31,7 +31,24 @@ jobs:
 
       - name: Toolchain
         run: |
+          # App Store Connect 自 2026 起要求 iOS 26 SDK（Xcode 26+）。
+          # runner 默认是 Xcode 16.4，必须显式切到 26.x。
+          XCODE_APP=""
+          for c in /Applications/Xcode_26.3.app /Applications/Xcode_26.2.app \
+                   /Applications/Xcode_26.1.1.app /Applications/Xcode_26.1.app \
+                   /Applications/Xcode_26.0.1.app /Applications/Xcode_26.0.app; do
+            if [ -d "$c" ]; then XCODE_APP="$c"; break; fi
+          done
+          if [ -z "$XCODE_APP" ]; then
+            echo "::error::找不到 Xcode 26，当前镜像可能太旧"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          echo "使用 $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
           xcodebuild -version
+          echo "SDK:"
+          xcodebuild -showsdks | grep -i iphoneos || true
           sw_vers
 
       - name: Install XcodeGen
