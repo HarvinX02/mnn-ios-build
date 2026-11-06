@@ -1,0 +1,50 @@
+name: Probe Toolchain
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Xcode version
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Check upload tooling
+        run: |
+          echo "=== xcrun tools available ==="
+          for t in altool notarytool transporter; do
+            if xcrun --find "$t" >/dev/null 2>&1; then
+              echo "OK   $t -> $(xcrun --find $t)"
+            else
+              echo "MISS $t"
+            fi
+          done
+
+      - name: altool version
+        run: |
+          xcrun altool --version 2>&1 || echo "altool --version failed"
+
+      - name: altool validate options
+        run: |
+          xcrun altool --help 2>&1 | head -40 || true
+
+      - name: Check Transporter app
+        run: |
+          ls -d /Applications/Transporter.app 2>/dev/null && echo "Transporter present" || echo "no Transporter.app"
+
+      - name: Check iTMSTransporter
+        run: |
+          ls "$HOME/.itmstransporter" 2>/dev/null || echo "no itmstransporter cache"
+          xcrun --find iTMSTransporter 2>/dev/null || echo "no iTMSTransporter in xcrun"
+
+      - name: Check xcodebuild auth-key flags
+        run: |
+          xcodebuild -help 2>&1 | grep -i -A2 'authenticationKey' || echo "no authenticationKey flag found in xcodebuild -help"
+
+      - name: Check notarytool
+        run: |
+          xcrun notarytool --help 2>&1 | head -20 || true
