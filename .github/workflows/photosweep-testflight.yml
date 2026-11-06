@@ -205,7 +205,8 @@ jobs:
           # macOS runner 的系统 Python 受 PEP 668 保护，直接 pip install 会报
           # externally-managed-environment，因此用隔离的 venv。
           python3 -m venv "$RUNNER_TEMP/ascvenv"
-          "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt
+          # PyJWT 对 ES256 只提供 adapter，真正签名依赖 cryptography
+          "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt cryptography
           "$RUNNER_TEMP/ascvenv/bin/python" PhotoSweep/ci/assign_testflight.py \
             --build-number "$BUILD_NUM" \
             --whats-new "$WHATS_NEW"
