@@ -100,12 +100,13 @@ struct KindScorer {
     }
 
     /// 各题材权重（合计 = 1.0）
+    /// 截图同样参与评分，但只评"可读性"：文字锐度 + 分辨率 + 对比度。
+    /// 曝光和色彩对截图没有意义，权重归零。
     static func weights(for kind: PhotoKind) -> Weights {
         switch kind {
         case .screenshot:
-            // 截图：只关心文字是否清晰、分辨率够不够。曝光/色彩无意义。
-            return Weights(sharpness: 0.55, exposure: 0.0, contrast: 0.15,
-                           color: 0.0, noise: 0.05, resolution: 0.25)
+            return Weights(sharpness: 0.58, exposure: 0.0, contrast: 0.17,
+                           color: 0.0, noise: 0.05, resolution: 0.20)
 
         case .document:
             // 文档票据：锐度压倒一切，其次对比度（黑白分明）、低噪点。
@@ -162,7 +163,7 @@ struct KindScorer {
     static func exposureWindow(for kind: PhotoKind) -> (low: Double, high: Double) {
         switch kind {
         case .night:      return (0.05, 0.40)
-        case .screenshot: return (0.0, 1.0)     // 不参与评分
+        case .screenshot: return (0.0, 1.0)     // 不计入评分
         case .document:   return (0.45, 0.90)
         case .portrait:   return (0.32, 0.70)
         default:          return (0.30, 0.72)
@@ -173,7 +174,7 @@ struct KindScorer {
     /// 截图/文档因为是大片纯色 + 细字，拉普拉斯方差天然偏低，门槛要下调。
     static func sharpnessFloor(for kind: PhotoKind) -> Double {
         switch kind {
-        case .screenshot: return 0.12
+        case .screenshot: return 0.16
         case .document:   return 0.15
         case .night:      return 0.18
         case .portrait:   return 0.30
@@ -210,16 +211,15 @@ struct KindScorer {
             expScore = 1.0
         }
 
-        // 分辨率得分：按题材给不同目标
+        // 分辨率得分：截图目标是"能看清字"，约 3MP 就够
         let mpTarget: Double
         switch kind {
-        case .screenshot: mpTarget = 3.0     // 手机截图约 3MP
+        case .screenshot: mpTarget = 2.5
         case .document:   mpTarget = 6.0
         default:          mpTarget = 10.0
         }
         let mpScore = min(1.0, megapixels / mpTarget)
 
-        // 噪点得分：噪点越低越好
         let noiseScore = 1.0 - noise
 
         var s = sharpness * w.sharpness
@@ -235,7 +235,6 @@ struct KindScorer {
         let floor = sharpnessFloor(for: kind)
         if sharpness < floor {
             issues.append(.blurry)
-            // 锐度远低于门槛时，再扣分（避免"及格线以下都一样"）
             let deficit = (floor - sharpness) / max(0.01, floor)
             s *= (1.0 - 0.45 * min(1.0, deficit))
         }
@@ -245,7 +244,6 @@ struct KindScorer {
             if brightness > 0.93 { issues.append(.overexposed) }
         }
 
-        // 对比度低：但截图/文档例外
         if kind != .screenshot && contrast < 0.10 {
             issues.append(.lowContrast)
         }
@@ -254,12 +252,9 @@ struct KindScorer {
             issues.append(.noisy)
         }
 
-        if megapixels < 1.0 && kind != .screenshot {
-            issues.append(.lowRes)
-        }
-
-        // 截图低于 1MP 多半是拼接/长截图压缩，仍提示
-        if kind == .screenshot && megapixels < 0.3 {
+        // 分辨率：截图按 1MP 判定（低于此基本看不清内容）
+        let resFloor: Double = (kind == .screenshot) ? 1.0 : 1.0
+        if megapixels < resFloor {
             issues.append(.lowRes)
         }
 

@@ -43,6 +43,9 @@ final class LibraryScanner: ObservableObject {
     @Published private(set) var records: [PhotoRecord] = []
     @Published private(set) var groups: [SimilarGroup] = []
 
+    /// 扫描结束后给用户的一句说明（例如"没有新照片"）
+    @Published var lastMessage: String = ""
+
     private let store = RecordStore()
 
     /// 是否对文字类照片做 OCR。关闭可提速约 30%。
@@ -74,17 +77,20 @@ final class LibraryScanner: ObservableObject {
 
     // MARK: 扫描
 
-    func startScan() {
+    /// force = true 时忽略已有结果，全部重扫。
+    /// 之前的实现里 todo 为空会静默 return，按钮按下去毫无反应，
+    /// 这里补上明确的状态反馈。
+    func startScan(force: Bool = false) {
         guard !phase.isRunning else { return }
         cancelFlag = false
-        Task { await runScan() }
+        Task { await runScan(force: force) }
     }
 
     func cancel() {
         cancelFlag = true
     }
 
-    private func runScan() async {
+    private func runScan(force: Bool) async {
         phase = .enumerating
 
         let opts = PHFetchOptions()
@@ -97,20 +103,30 @@ final class LibraryScanner: ObservableObject {
             infos.append(makeInfo(asset))
         }
 
-        let doneIDs = Set(records.map { $0.id })
+        if infos.isEmpty {
+            phase = .failed("相册里没有找到照片。\n请确认系统设置 → 照片 → 本 App 已获授权。")
+            return
+        }
+
+        let doneIDs = force ? [] : Set(records.map { $0.id })
         let todo = infos.filter { !doneIDs.contains($0.id) }
 
         if todo.isEmpty {
+            // 全部已分析过：不静默返回，给出明确结果
             groups = SimilarGrouper.group(records)
             phase = .finished
+            lastMessage = "没有新照片。已有 \(records.count) 张分析结果。\n如需按新标准重算，请点「全部重新扫描」。"
             return
         }
+
+        if force { records = [] }
+        lastMessage = ""
 
         phase = .analyzing(done: 0, total: todo.count)
 
         let batchSize = 4
         let useOCR = enableOCR
-        var fresh = records
+        var fresh = force ? [] : records
 
         for chunkStart in stride(from: 0, to: todo.count, by: batchSize) {
             if cancelFlag {

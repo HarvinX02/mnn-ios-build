@@ -10,8 +10,11 @@ struct RootView: View {
             ScanView()
                 .tabItem { Label("扫描", systemImage: "sparkle.magnifyingglass") }
 
+            CategoryView()
+                .tabItem { Label("分类", systemImage: "square.grid.2x2") }
+
             GalleryView()
-                .tabItem { Label("图库", systemImage: "square.grid.2x2") }
+                .tabItem { Label("图库", systemImage: "photo.on.rectangle") }
 
             SimilarView()
                 .tabItem { Label("相似", systemImage: "rectangle.stack") }
@@ -81,16 +84,48 @@ struct ScanView: View {
 
             switch scanner.phase {
             case .idle, .finished, .failed:
-                Button {
-                    scanner.enableOCR = enableOCR
-                    scanner.startScan()
-                } label: {
-                    Label(scanner.records.isEmpty ? "开始扫描相册" : "继续扫描新照片",
-                          systemImage: "play.fill")
-                        .frame(maxWidth: .infinity)
+                VStack(spacing: 10) {
+                    Button {
+                        scanner.enableOCR = enableOCR
+                        scanner.startScan()
+                    } label: {
+                        Label(scanner.records.isEmpty ? "开始扫描相册" : "扫描新照片",
+                              systemImage: "play.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    // 显式的全量重算入口。评分标准变过之后必须能重扫，
+                    // 否则用户会被"只有继续扫描"卡住。
+                    if !scanner.records.isEmpty {
+                        Button {
+                            scanner.enableOCR = enableOCR
+                            scanner.startScan(force: true)
+                        } label: {
+                            Label("全部重新扫描（\(scanner.records.count) 张）",
+                                  systemImage: "arrow.triangle.2.circlepath")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                    }
+
+                    if !scanner.lastMessage.isEmpty {
+                        Text(scanner.lastMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    if case .failed(let msg) = scanner.phase {
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
 
             case .enumerating:
                 ProgressView("正在读取相册…")
