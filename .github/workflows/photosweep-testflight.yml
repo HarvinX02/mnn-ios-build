@@ -1,0 +1,186 @@
+name: PhotoSweep TestFlight
+
+# 用 App Store Connect API Key 自动创建分发证书 + 描述文件，
+# Archive 后通过 altool 直传 TestFlight，不需要手动导 p12/mobileprovision。
+#
+# 需要 Secrets（已配置）：
+#   ASC_KEY_P8 / ASC_KEY_ID / ASC_ISSUER_ID   API Key
+#   ASC_APP_PASSWORD + APPLE_ID_EMAIL          altool 上传认证
+#   TEAM_ID / BUNDLE_ID / KEYCHAIN_PASSWORD
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "是否上传到 TestFlight"
+        type: boolean
+        default: true
+      build_number:
+        description: "构建号（留空自动用 run number）"
+        required: false
+        default: ""
+
+jobs:
+  testflight:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Write API key and profile dir
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          set -euo pipefail
+          KEYDIR="$RUNNER_TEMP/private_keys"
+          mkdir -p "$KEYDIR"
+          printf '%s\n' "$ASC_KEY_P8" > "$KEYDIR/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$KEYDIR/AuthKey_${ASC_KEY_ID}.p8"
+          echo "key written: $(ls -l "$KEYDIR")"
+          # xcodebuild 默认从这个位置找 key
+          mkdir -p "$HOME/private_keys"
+          cp "$KEYDIR/AuthKey_${ASC_KEY_ID}.p8" "$HOME/private_keys/"
+
+      - name: Generate Xcode project
+        working-directory: PhotoSweep
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+          BUILD_NUM: ${{ inputs.build_number != '' && inputs.build_number || github.run_number }}
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          ls -la
+
+      - name: Archive
+        working-directory: PhotoSweep
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUILD_NUM: ${{ inputs.build_number != '' && inputs.build_number || github.run_number }}
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project PhotoSweep.xcodeproj \
+            -scheme PhotoSweep \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/PhotoSweep.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUM" \
+            CODE_SIGN_STYLE=Automatic \
+            -showBuildTimingSummary
+
+      - name: Show archive contents
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/PhotoSweep.xcarchive/Products/Applications/PhotoSweep.app"
+          du -sh "$APP"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
+          echo "--- signature ---"
+          codesign -dv "$APP" 2>&1 | head -20 || true
+          echo "--- embedded profile ---"
+          if [ -f "$APP/embedded.mobileprovision" ]; then
+            security cms -D -i "$APP/embedded.mobileprovision" > "$RUNNER_TEMP/pp.plist"
+            /usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/pp.plist" || true
+            /usr/libexec/PlistBuddy -c "Print :ProvisionsAllDevices" "$RUNNER_TEMP/pp.plist" || true
+            /usr/libexec/PlistBuddy -c "Print :Entitlements:beta-reports-active" "$RUNNER_TEMP/pp.plist" || true
+          else
+            echo "NO embedded.mobileprovision"
+          fi
+
+      - name: Export IPA
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>destination</key>
+            <string>export</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>stripSwiftSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/PhotoSweep.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          ls -lh "$RUNNER_TEMP/export"
+
+      - name: Upload to TestFlight
+        if: ${{ inputs.upload }}
+        env:
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          ASC_APP_PASSWORD: ${{ secrets.ASC_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          IPA=$(ls "$RUNNER_TEMP"/export/*.ipa | head -1)
+          echo "uploading $IPA"
+          xcrun altool --upload-app \
+            -f "$IPA" \
+            -t ios \
+            --username "$APPLE_ID_EMAIL" \
+            --password "$ASC_APP_PASSWORD" \
+            --verbose 2>&1 | tee "$RUNNER_TEMP/upload.log" || {
+              echo "::error::altool upload failed"
+              tail -60 "$RUNNER_TEMP/upload.log"
+              exit 1
+            }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoSweep-testflight-ipa
+          path: ${{ runner.temp }}/export/*.ipa
+          retention-days: 14
+
+      - name: Upload export options on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-diagnostics
+          path: |
+            ${{ runner.temp }}/export.plist
+            ${{ runner.temp }}/upload.log
+          retention-days: 7
+          if-no-files-found: ignore
