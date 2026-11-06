@@ -19,6 +19,10 @@ on:
         description: "构建号（留空自动用 run number）"
         required: false
         default: ""
+      whats_new:
+        description: "TestFlight 更新说明（留空自动生成）"
+        required: false
+        default: ""
 
 jobs:
   testflight:
@@ -184,6 +188,24 @@ jobs:
               tail -60 "$RUNNER_TEMP/upload.log"
               exit 1
             }
+
+      # altool 只是把 ipa 送到 Apple 服务器；新 build 默认不属于任何测试组，
+      # TestFlight 客户端里看不到。必须显式关联，否则每次都要人工去网页点。
+      - name: Assign build to TestFlight group
+        if: ${{ inputs.upload }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+          BUILD_NUM: ${{ inputs.build_number != '' && inputs.build_number || github.run_number }}
+          WHATS_NEW: ${{ inputs.whats_new }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check pyjwt
+          python3 PhotoSweep/ci/assign_testflight.py \
+            --build-number "$BUILD_NUM" \
+            --whats-new "$WHATS_NEW"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
