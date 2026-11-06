@@ -359,8 +359,9 @@ final class PhotoAnalyzer {
             if let results = animalReq.results {
                 for obs in results {
                     guard let best = obs.labels.first else { continue }
-                    if best.confidence > animalConf {
-                        animalConf = Double(best.confidence)
+                    let conf = Double(best.confidence)
+                    if conf > animalConf {
+                        animalConf = conf
                         animalLabel = best.identifier
                     }
                 }
