@@ -9,9 +9,15 @@ final class ThumbCache {
     private let lock = NSLock()
     private let mgr = PHCachingImageManager()
 
-    func image(for id: String, size: CGFloat = 200) -> UIImage? {
+    /// size 单位是「像素」。缩略图用 aspectFill 铺满方格，
+    /// 详情/全屏传 CGSize.zero 表示要原始分辨率。
+    func image(for id: String,
+               pixelSize: CGSize,
+               contentMode: PHImageContentMode = .aspectFill) -> UIImage? {
+        let key = "\(id)_\(Int(pixelSize.width))x\(Int(pixelSize.height))_\(contentMode == .aspectFill ? "f" : "t")"
+
         lock.lock()
-        let hit = cache[id]
+        let hit = cache[key]
         lock.unlock()
         if let hit { return hit }
 
@@ -20,17 +26,26 @@ final class ThumbCache {
 
         let opt = PHImageRequestOptions()
         opt.isSynchronous = true
-        opt.deliveryMode = .fastFormat
-        opt.resizeMode = .fast
+        // 关键修复 1：用 highQualityFormat 而不是 fastFormat，
+        // fastFormat 会让系统返回低分辨率近似图（表现为很糊）。
+        opt.deliveryMode = .highQualityFormat
+        // 关键修复 2：exact 才按 targetSize 精确缩放；fast 会牺牲尺寸换速度。
+        opt.resizeMode = .exact
+        opt.isNetworkAccessAllowed = true
+        opt.version = .current
 
         var out: UIImage?
         mgr.requestImage(for: asset,
-                         targetSize: CGSize(width: size, height: size),
-                         contentMode: .aspectFill,
-                         options: opt) { img, _ in out = img }
+                         targetSize: pixelSize,
+                         contentMode: contentMode,
+                         options: opt) { img, info in
+            // degraded 的中间图直接丢弃，只接受最终图
+            if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded { return }
+            if let img { out = img }
+        }
 
         if let out {
-            lock.lock(); cache[id] = out; lock.unlock()
+            lock.lock(); cache[key] = out; lock.unlock()
         }
         return out
     }
@@ -38,6 +53,7 @@ final class ThumbCache {
 
 struct ThumbView: View {
     let id: String
+    /// 逻辑点尺寸；内部按屏幕 scale 换算成像素，避免 3x 屏只拿到 1/3 分辨率
     var size: CGFloat = 200
     @State private var img: UIImage?
 
@@ -56,8 +72,12 @@ struct ThumbView: View {
         .task(id: id) {
             let key = id
             let s = size
+            // 关键修复 3：点 → 像素，并额外乘 1.2 做留白，防止 aspectFill 放大后发虚
+            let px = UIScreen.main.scale * s * 1.2
             let loaded = await Task.detached(priority: .userInitiated) {
-                ThumbCache.shared.image(for: key, size: s)
+                ThumbCache.shared.image(for: key,
+                                        pixelSize: CGSize(width: px, height: px),
+                                        contentMode: .aspectFill)
             }.value
             if img == nil { img = loaded }
         }
@@ -262,23 +282,39 @@ struct GalleryView: View {
 struct DetailView: View {
     let record: PhotoRecord
     @State private var img: UIImage?
-    @Environment(\.dismiss) private var dismiss
+    @State private var showFullscreen = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                ZStack {
-                    Color(.secondarySystemBackground)
-                    if let img {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFit()
-                    } else {
-                        ProgressView()
+                // 点击进入全屏，全屏内可捏合放大、双击放大
+                Button {
+                    showFullscreen = true
+                } label: {
+                    ZStack {
+                        Color(.secondarySystemBackground)
+                        if let img {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFit()
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 320)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption)
+                            .padding(6)
+                            .background(.black.opacity(0.5), in: Capsule())
+                            .foregroundStyle(.white)
+                            .padding(8)
                     }
                 }
-                .frame(maxHeight: 420)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .buttonStyle(.plain)
+                .disabled(img == nil)
 
                 scoreBlock
                 metricsBlock
@@ -292,13 +328,132 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             let id = record.id
-            let loaded = await Task.detached {
-                ThumbCache.shared.image(for: id, size: 1200)
+            // 关键修复 4：详情页要原始分辨率，避免被缩到 1200 后放大发虚
+            let loaded = await Task.detached(priority: .userInitiated) {
+                ThumbCache.shared.image(for: id,
+                                        pixelSize: PHImageManagerMaximumSize,
+                                        contentMode: .aspectFit)
+            }.value
+            img = loaded
+        }
+        .fullScreenCover(isPresented: $showFullscreen) {
+            PhotoFullscreenView(assetID: record.id, fallback: img)
+        }
+    }
+}
+
+// MARK: - 全屏查看（可缩放）
+
+struct PhotoFullscreenView: View {
+    let assetID: String
+    var fallback: UIImage?
+    @Environment(\.dismiss) private var dismiss
+    @State private var img: UIImage?
+
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if let shown = img ?? fallback {
+                Image(uiImage: shown)
+                    .resizable()
+                    .scaledToFit()
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(magnification)
+                    .simultaneousGesture(drag)
+                    .onTapGesture(count: 2) { toggleZoom() }
+                    .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.8), value: scale)
+                    .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.8), value: offset)
+            } else {
+                ProgressView().tint(.white)
+            }
+
+            VStack {
+                HStack {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.title3.weight(.semibold))
+                            .padding(12)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Spacer()
+                    if scale > 1.01 {
+                        Button {
+                            scale = 1; offset = .zero
+                            lastScale = 1; lastOffset = .zero
+                        } label: {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.title3.weight(.semibold))
+                                .padding(12)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                    }
+                }
+                .padding()
+                Spacer()
+            }
+            .foregroundStyle(.white)
+        }
+        .statusBarHidden()
+        .task {
+            guard img == nil else { return }
+            let id = assetID
+            let loaded = await Task.detached(priority: .userInitiated) {
+                ThumbCache.shared.image(for: id,
+                                        pixelSize: PHImageManagerMaximumSize,
+                                        contentMode: .aspectFit)
             }.value
             img = loaded
         }
     }
 
+    private var magnification: some Gesture {
+        MagnificationGesture()
+            .onChanged { v in
+                let next = lastScale * v
+                scale = min(max(next, 1), 6)
+            }
+            .onEnded { _ in
+                lastScale = scale
+                if scale <= 1 { offset = .zero; lastOffset = .zero }
+            }
+    }
+
+    private var drag: some Gesture {
+        DragGesture()
+            .onChanged { v in
+                guard scale > 1 else { return }
+                offset = CGSize(width: lastOffset.width + v.translation.width,
+                                height: lastOffset.height + v.translation.height)
+            }
+            .onEnded { _ in
+                guard scale > 1 else { offset = .zero; lastOffset = .zero; return }
+                lastOffset = offset
+            }
+    }
+
+    private func toggleZoom() {
+        if scale > 1.01 {
+            scale = 1; offset = .zero
+            lastScale = 1; lastOffset = .zero
+        } else {
+            scale = 2.5
+            lastScale = 2.5
+        }
+    }
+}
+
+// MARK: - 详情页（原结构继续）
+
+extension DetailView {
     private var scoreBlock: some View {
         HStack(spacing: 16) {
             ZStack {
