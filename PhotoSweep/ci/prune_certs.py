@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """删除 CI 自己申请、且已经无用的旧开发证书。
 
 每次 xcodebuild -allowProvisioningUpdates 在干净的 runner 上都会申请一张新的
@@ -7,7 +7,7 @@
 （"Your account has reached the maximum number of certificates"）。
 
 这里只清理创建时间早于 KEEP_DAYS 天的证书：证书有效期固定一年，因此
-创建时间 = expirationDate - 365 天，不需要额外的接口字段。
+创建时间 = expirationDate - 365 天，不需要额外的接口字段。\n\n迭代期保留窗口默认只有 3 小时，够本次构建用即可，避免又撞上配额。
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ API = "https://api.appstoreconnect.apple.com"
 KEY_ID = os.environ.get("ASC_KEY_ID", "")
 ISSUER = os.environ.get("ASC_ISSUER_ID", "")
 KEY_P8 = os.environ.get("ASC_KEY_P8", "")
-KEEP_DAYS = int(os.environ.get("KEEP_DAYS", "3"))
+KEEP_HOURS = int(os.environ.get("KEEP_HOURS", "3"))
 
 
 def token() -> str:
@@ -48,7 +48,7 @@ def main() -> int:
     r.raise_for_status()
     certs = r.json().get("data", [])
 
-    cutoff = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=365 - KEEP_DAYS)
+    cutoff = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=365) - dt.timedelta(hours=KEEP_HOURS)
     victims = []
     for c in certs:
         a = c.get("attributes", {})
@@ -59,7 +59,7 @@ def main() -> int:
         if parsed and parsed < cutoff:
             victims.append((c["id"], a.get("certificateType"), exp))
 
-    print(f"certificates total={len(certs)} prune_candidates={len(victims)} keep_days={KEEP_DAYS}")
+    print(f"certificates total={len(certs)} prune_candidates={len(victims)} keep_hours={KEEP_HOURS}")
     for cid, ctype, exp in victims:
         d = s.delete(f"{API}/v1/certificates/{cid}", timeout=60)
         print(f"  delete {cid} {ctype} {exp} -> {d.status_code}")

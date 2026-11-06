@@ -206,7 +206,7 @@ jobs:
           # externally-managed-environment，因此用隔离的 venv。
           python3 -m venv "$RUNNER_TEMP/ascvenv"
           # PyJWT 对 ES256 只提供 adapter，真正签名依赖 cryptography
-          "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt cryptography
+          "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt cryptography requests
           "$RUNNER_TEMP/ascvenv/bin/python" PhotoSweep/ci/assign_testflight.py \
             --build-number "$BUILD_NUM" \
             --whats-new "$WHATS_NEW"
@@ -224,7 +224,7 @@ jobs:
           set -uo pipefail
           if [ ! -x "$RUNNER_TEMP/ascvenv/bin/python" ]; then
             python3 -m venv "$RUNNER_TEMP/ascvenv"
-            "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt cryptography
+            "$RUNNER_TEMP/ascvenv/bin/python" -m pip install --quiet --disable-pip-version-check pyjwt cryptography requests
           fi
           "$RUNNER_TEMP/ascvenv/bin/python" PhotoSweep/ci/prune_certs.py || true
 

@@ -1,6 +1,4 @@
-﻿ci: 清理旧的自动签名证书，避免撞上 Apple 证书上限
+﻿ci: 证书清理改为 3 小时窗口并补上 requests 依赖
 
-每次 -allowProvisioningUpdates 都会在干净 runner 上申请新证书，私钥随 runner
-销毁，长期累积会触发 "Your account has reached the maximum number of
-certificates"，让 Archive 直接失败。加一个 always() 步骤删除 3 天前的
-"Created via API" 证书，并容忍失败以免影响主流程。
+- 迭代期只保留最近 3 小时申请的分发证书，避免再次撞上 Apple 配额
+- prune_certs.py 依赖 requests，venv 安装列表补齐
