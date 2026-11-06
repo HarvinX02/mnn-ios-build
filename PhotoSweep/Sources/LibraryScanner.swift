@@ -206,6 +206,36 @@ final class LibraryScanner: ObservableObject {
         }
     }
 
+    // MARK: 手动改判
+
+    /// 用户手动改判某张照片的题材，并用新题材的权重重新打分。
+    func overrideKind(ids: [String], to kind: PhotoKind?) {
+        let set = Set(ids)
+        for i in records.indices where set.contains(records[i].id) {
+            records[i].manualKind = kind
+            // 用该题材的标准重算分数
+            let scored = KindScorer.score(
+                kind: records[i].effectiveKind,
+                sharpness: records[i].sharpness,
+                brightness: records[i].exposure,
+                contrast: records[i].contrast,
+                colorfulness: records[i].colorfulness,
+                noise: records[i].noise,
+                megapixels: records[i].megapixels
+            )
+            records[i].qualityScore = scored.score
+            records[i].grade = QualityGrade.from(score: scored.score)
+            records[i].issues = scored.issues
+        }
+        store.save(records)
+        groups = SimilarGrouper.group(records)
+    }
+
+    /// 恢复自动判定
+    func clearKindOverride(ids: [String]) {
+        overrideKind(ids: ids, to: nil)
+    }
+
     // MARK: 删除
 
     func delete(ids: [String]) async throws {

@@ -43,7 +43,8 @@ final class PhotoAnalyzer {
             brightness: stats.brightness,
             contrast: stats.contrast,
             colorfulness: stats.colorfulness,
-            pixelRatio: ratio
+            pixelRatio: ratio,
+            sharpness: sharp
         )
 
         // 5) 按题材加权评分 + 问题检出
@@ -282,7 +283,10 @@ final class PhotoAnalyzer {
             try handler.perform([classify])
             if let results = classify.results {
                 var seen = Set<String>()
-                for obs in results where obs.confidence > 0.12 {
+                // 置信度门槛提高到 0.20：
+                // 0.12 时噪声标签太多（钩织企鹅 -> bird、玩偶 -> toy、菜单 -> document），
+                // 这些弱标签会把题材判定带偏。0.20 只保留相对可信的标签。
+                for obs in results where obs.confidence > 0.20 {
                     let label = obs.identifier
                     let zh = CategoryMap.zh(for: label)
                     if zh == "其他" { continue }
@@ -290,7 +294,7 @@ final class PhotoAnalyzer {
                     seen.insert(zh)
                     cats.append(CategoryHit(label: label, zh: zh, confidence: Double(obs.confidence)))
                     if topID.isEmpty { topID = label }
-                    if cats.count >= 4 { break }
+                    if cats.count >= 5 { break }
                 }
             }
         } catch { }

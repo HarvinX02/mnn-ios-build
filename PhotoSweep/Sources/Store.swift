@@ -100,7 +100,10 @@ enum SimilarGrouper {
         for (_, indices) in buckets where indices.count > 1 {
             let recs = indices.map { records[$0] }
             // 保留画质最高的那张
-            let keeper = recs.max { $0.qualityScore < $1.qualityScore }!
+            // 不评分的照片（截图）不参与"保留最佳"比较，优先在已评分里挑
+            let scored = recs.filter { $0.isScored }
+            let keeper = (scored.isEmpty ? recs : scored)
+                .max { $0.qualityScore < $1.qualityScore }!
             let id = recs.map { $0.id }.sorted().joined(separator: "|")
             out.append(SimilarGroup(id: id,
                                     records: recs,

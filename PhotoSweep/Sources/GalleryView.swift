@@ -58,17 +58,25 @@ struct ThumbView: View {
     @State private var img: UIImage?
 
     var body: some View {
-        ZStack {
-            Rectangle().fill(Color(.tertiarySystemFill))
-            if let img {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ProgressView().scaleEffect(0.6)
+        GeometryReader { geo in
+            ZStack {
+                Rectangle().fill(Color(.tertiarySystemFill))
+                if let img {
+                    Image(uiImage: img)
+                        .resizable()
+                        // scaledToFill + 显式 frame + clipped，三者缺一不可。
+                        // 只用 scaledToFill 会让超长图（长截图）撑破网格单元，
+                        // 表现为"一张图盖住旁边好几张"。
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                } else {
+                    ProgressView().scaleEffect(0.6)
+                }
             }
         }
         .clipped()
+        .contentShape(Rectangle())
         .task(id: id) {
             let key = id
             let s = size
@@ -104,7 +112,7 @@ struct GalleryView: View {
         var list = scanner.records
 
         if let k = kindFilter {
-            list = list.filter { $0.kind == k }
+            list = list.filter { $0.effectiveKind == k }
         }
         if let g = gradeFilter {
             list = list.filter { $0.grade == g }
@@ -128,12 +136,14 @@ struct GalleryView: View {
         switch sort {
         case .worst:
             list.sort {
-                if $0.kind != $1.kind { return $0.kind.rawValue < $1.kind.rawValue }
+                if $0.effectiveKind != $1.effectiveKind { return $0.effectiveKind.rawValue < $1.effectiveKind.rawValue }
+                if $0.isScored != $1.isScored { return !$0.isScored }
                 return $0.qualityScore < $1.qualityScore
             }
         case .best:
             list.sort {
-                if $0.kind != $1.kind { return $0.kind.rawValue < $1.kind.rawValue }
+                if $0.effectiveKind != $1.effectiveKind { return $0.effectiveKind.rawValue < $1.effectiveKind.rawValue }
+                if $0.isScored != $1.isScored { return $0.isScored }
                 return $0.qualityScore > $1.qualityScore
             }
         case .newest:  list.sort { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
@@ -145,7 +155,7 @@ struct GalleryView: View {
 
     private var allKinds: [(PhotoKind, Int)] {
         var counter: [PhotoKind: Int] = [:]
-        for r in scanner.records { counter[r.kind, default: 0] += 1 }
+        for r in scanner.records { counter[r.effectiveKind, default: 0] += 1 }
         return counter.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }
     }
 
@@ -269,10 +279,13 @@ struct GalleryView: View {
         let isSel = selection.contains(rec.id)
         return ZStack(alignment: .topTrailing) {
             NavigationLink {
-                DetailView(record: rec)
+                DetailView(record: rec) { k in
+                    scanner.overrideKind(ids: [rec.id], to: k)
+                }
             } label: {
                 ThumbView(id: rec.id)
-                    .aspectRatio(1, contentMode: .fill)
+                    .aspectRatio(1, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(alignment: .bottomLeading) {
                         gradeBadge(rec)
@@ -302,12 +315,18 @@ struct GalleryView: View {
 
     private func gradeBadge(_ rec: PhotoRecord) -> some View {
         HStack(spacing: 3) {
-            Circle()
-                .fill(badgeColor(rec.grade))
-                .frame(width: 6, height: 6)
-            Text(String(format: "%.0f", rec.qualityScore * 100))
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+            if rec.isScored {
+                Circle()
+                    .fill(badgeColor(rec.grade))
+                    .frame(width: 6, height: 6)
+                Text(String(format: "%.0f", rec.qualityScore * 100))
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+            } else {
+                Text("不评分")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 2)
@@ -329,6 +348,9 @@ struct GalleryView: View {
 
 struct DetailView: View {
     let record: PhotoRecord
+    /// 手动改判题材；nil 表示恢复自动判定
+    var onOverrideKind: (PhotoKind?) -> Void = { _ in }
+
     @State private var img: UIImage?
     @State private var showFullscreen = false
 
@@ -508,17 +530,28 @@ extension DetailView {
             ZStack {
                 Circle()
                     .stroke(Color(.tertiarySystemFill), lineWidth: 8)
-                Circle()
-                    .trim(from: 0, to: CGFloat(record.qualityScore))
-                    .stroke(scoreColor, style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
+                if record.isScored {
+                    Circle()
+                        .trim(from: 0, to: CGFloat(record.qualityScore))
+                        .stroke(scoreColor, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
                 VStack(spacing: 0) {
-                    Text(String(format: "%.0f", record.qualityScore * 100))
-                        .font(.title2.weight(.bold))
-                        .monospacedDigit()
-                    Text("分")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if record.isScored {
+                        Text(String(format: "%.0f", record.qualityScore * 100))
+                            .font(.title2.weight(.bold))
+                            .monospacedDigit()
+                        Text("分")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("N/A")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.secondary)
+                        Text("不评分")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .frame(width: 84, height: 84)
@@ -526,20 +559,53 @@ extension DetailView {
             VStack(alignment: .leading, spacing: 6) {
                 // 明确标注：这是"在同类里的分数"
                 HStack(spacing: 4) {
-                    Image(systemName: record.kind.symbol)
-                    Text(record.kind.rawValue)
+                    Image(systemName: record.effectiveKind.symbol)
+                    Text(record.effectiveKind.rawValue)
+                    if record.manualKind != nil {
+                        Image(systemName: "hand.point.up.left.fill")
+                            .font(.caption2)
+                    }
                 }
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(Color.accentColor.opacity(0.12), in: Capsule())
 
-                Label(record.grade.rawValue, systemImage: record.grade.symbol)
-                    .font(.headline)
-                    .foregroundStyle(scoreColor)
+                if record.isScored {
+                    Label(record.grade.rawValue, systemImage: record.grade.symbol)
+                        .font(.headline)
+                        .foregroundStyle(scoreColor)
+                } else {
+                    Label("不参与质量评分", systemImage: "minus.circle")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
 
-                Text("按「\(record.kind.rawValue)」标准评分 · \(record.aspectLabel)幅")
+                Text("按「\(record.effectiveKind.rawValue)」标准评分 · \(record.aspectLabel)幅")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                // 自动分类永远有错，这里给人工纠正入口
+                Menu {
+                    Button {
+                        onOverrideKind(nil)
+                    } label: {
+                        Label("恢复自动判定", systemImage: "arrow.counterclockwise")
+                    }
+                    Divider()
+                    ForEach(PhotoKind.allCases) { k in
+                        Button {
+                            onOverrideKind(k)
+                        } label: {
+                            Label(k.rawValue, systemImage: k.symbol)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "pencil")
+                        Text(record.manualKind == nil ? "题材判错了？" : "已手动改判")
+                    }
+                    .font(.caption)
+                }
             }
             Spacer()
         }
@@ -576,7 +642,7 @@ extension DetailView {
                 .foregroundStyle(.secondary)
 
             metric("清晰度", record.sharpness,
-                   note: "≥\(String(format: "%.0f", KindScorer.sharpnessFloor(for: record.kind) * 100)) 达标")
+                   note: "≥\(String(format: "%.0f", KindScorer.sharpnessFloor(for: record.effectiveKind) * 100)) 达标")
             metric("曝光", record.exposure,
                    note: exposureNote)
             metric("对比度", record.contrast)
@@ -589,8 +655,8 @@ extension DetailView {
     }
 
     private var exposureNote: String {
-        let win = KindScorer.exposureWindow(for: record.kind)
-        if record.kind == .screenshot { return "不参与评分" }
+        let win = KindScorer.exposureWindow(for: record.effectiveKind)
+        if record.effectiveKind == .screenshot { return "不参与评分" }
         return "合理区间 \(Int(win.low * 100))–\(Int(win.high * 100))"
     }
 

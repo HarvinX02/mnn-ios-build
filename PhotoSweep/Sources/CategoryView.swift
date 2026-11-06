@@ -107,7 +107,7 @@ struct CategoryView: View {
 
     private var kindBuckets: [KindBucket] {
         var map: [PhotoKind: [PhotoRecord]] = [:]
-        for r in scanner.records { map[r.kind, default: []].append(r) }
+        for r in scanner.records { map[r.effectiveKind, default: []].append(r) }
         return map
             .map { KindBucket(kind: $0.key, records: $0.value) }
             .sorted { $0.records.count > $1.records.count }
@@ -257,10 +257,13 @@ struct BucketDetail: View {
                     ForEach(sorted) { rec in
                         ZStack(alignment: .topTrailing) {
                             NavigationLink {
-                                DetailView(record: rec)
+                                DetailView(record: rec) { k in
+                                    scanner.overrideKind(ids: [rec.id], to: k)
+                                }
                             } label: {
                                 ThumbView(id: rec.id)
-                                    .aspectRatio(1, contentMode: .fill)
+                                    .aspectRatio(1, contentMode: .fit)
+                                    .frame(maxWidth: .infinity)
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                                     .overlay(alignment: .bottomLeading) {
                                         Text(String(format: "%.0f", rec.qualityScore * 100))

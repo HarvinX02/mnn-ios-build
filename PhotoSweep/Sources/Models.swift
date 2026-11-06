@@ -63,6 +63,7 @@ enum QualityGrade: String, Codable, CaseIterable, Identifiable {
     }
 
     static func from(score: Double) -> QualityGrade {
+        if score < 0 { return .fair }   // 不计分时占位，UI 另行处理
         switch score {
         case 0.78...: return .excellent
         case 0.62..<0.78: return .good
@@ -122,12 +123,22 @@ struct PhotoRecord: Codable, Identifiable, Hashable {
     var tiltDegrees: Double         // 地平线倾斜角度
 
     /// 按题材加权后的综合分（0...1）。不同 PhotoKind 权重不同。
+    /// 值为 -1 表示该题材不评分（截图）。
     var qualityScore: Double
     var grade: QualityGrade
 
+    /// 是否参与评分
+    var isScored: Bool { qualityScore >= 0 }
     /// 题材判定结果与置信度
     var kind: PhotoKind
     var kindConfidence: Double
+
+    /// 用户手动改判的题材。非 nil 时优先于自动判定。
+    /// 自动分类永远做不到 100% 准，必须留人工纠错入口。
+    var manualKind: PhotoKind? = nil
+
+    /// 实际生效的题材（手动优先）
+    var effectiveKind: PhotoKind { manualKind ?? kind }
 
     /// 检出的问题项
     var issues: [PhotoIssue]
@@ -157,7 +168,7 @@ struct PhotoRecord: Codable, Identifiable, Hashable {
 
     /// 搜索用全文索引
     var searchBlob: String {
-        var parts: [String] = [primaryCategory, grade.rawValue, kind.rawValue]
+        var parts: [String] = [primaryCategory, grade.rawValue, effectiveKind.rawValue]
         parts.append(contentsOf: categories.map { $0.zh })
         parts.append(contentsOf: categories.map { $0.label })
         parts.append(contentsOf: issues.map { $0.rawValue })

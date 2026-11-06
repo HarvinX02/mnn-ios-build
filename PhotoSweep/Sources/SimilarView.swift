@@ -97,7 +97,7 @@ struct SimilarView: View {
                                         .padding(3)
                                 }
                             }
-                            Text(String(format: "%.0f", rec.qualityScore * 100))
+                            Text(rec.isScored ? String(format: "%.0f", rec.qualityScore * 100) : "N/A")
                                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                                 .foregroundStyle(.secondary)
                         }

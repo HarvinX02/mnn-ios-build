@@ -2,8 +2,21 @@ import Foundation
 
 // MARK: - 题材判定
 
-/// 根据 Vision 标签、人脸数、截图标记、OCR 文本量、画面统计，
-/// 推断这张照片属于哪一类题材。题材决定了后面用哪套评分标准。
+/// 判定策略（v2，重写）：
+///
+/// v1 的致命错误是把 "Vision 有没有给出某类标签" 直接当成题材。
+/// 但 Vision 标签很吵：
+///   - 钩织企鹅玩偶 -> 给出 bird
+///   - 一碗汤 + 菜单文字 -> 给出 food + text，被判成文档
+///   - 暗光室内的猫 -> 亮度低，被判成夜景
+///   - 拼豆手工作品 -> 给出 building/toy，被判成建筑
+///
+/// v2 改为三个原则：
+///   1) 先排除，再归类。截图/文档这类"强特征"先判，避免被后面抢走。
+///   2) 场景类题材（夜景/建筑/风景/街拍）必须有"场景证据"，不能只靠亮度或单个标签。
+///   3) 主体类题材（宠物/美食/人像）靠"主体标签 + 置信度"取胜，且镜头类场景不抢。
+///
+/// 另外：自动判定永远会有错。UI 必须提供手动改判入口，这是设计前提，不是补丁。
 enum KindClassifier {
 
     static func classify(isScreenshot: Bool,
@@ -14,73 +27,145 @@ enum KindClassifier {
                          brightness: Double,
                          contrast: Double,
                          colorfulness: Double,
-                         pixelRatio: Double) -> (kind: PhotoKind, confidence: Double) {
+                         pixelRatio: Double,
+                         sharpness: Double) -> (kind: PhotoKind, confidence: Double) {
 
-        let ids = categories.map { $0.label.lowercased() }
-        let all = ([topIdentifier.lowercased()] + ids).filter { !$0.isEmpty }
-        func has(_ keys: String...) -> Bool {
-            all.contains { id in keys.contains { id.contains($0) } }
+        // ---- 准备：标签表（带置信度）----
+        var conf: [String: Double] = [:]
+        for c in categories {
+            let k = c.label.lowercased()
+            conf[k] = max(conf[k] ?? 0, c.confidence)
         }
+        let topLower = topIdentifier.lowercased()
+        if !topLower.isEmpty { conf[topLower] = max(conf[topLower] ?? 0, 0.5) }
 
-        // 1) 截图：系统标记最可靠
+        /// 某前缀的最高置信度
+        func score(_ prefixes: [String]) -> Double {
+            var best = 0.0
+            for (label, c) in conf {
+                for p in prefixes where label.contains(p) {
+                    best = max(best, c)
+                }
+            }
+            return best
+        }
+        func has(_ prefixes: String...) -> Bool { score(prefixes) > 0 }
+
+        let ocrLen = ocrText.count
+
+        // =========================================================
+        // 第 1 层：强特征，优先级最高
+        // =========================================================
+
+        // 1.1 截图 —— 系统标记，最可靠
         if isScreenshot { return (.screenshot, 1.0) }
 
-        // 2) 文档票据：OCR 文字多 + 低色彩 + 近白底
-        let ocrLen = ocrText.count
-        if ocrLen > 40 && colorfulness < 0.35 && brightness > 0.55 {
-            return (.document, 0.85)
-        }
-        if has("document", "receipt", "text", "chart") && ocrLen > 12 {
-            return (.document, 0.75)
-        }
-
-        // 3) 人像：有脸，且不是大群人
-        if faceCount >= 1 && faceCount <= 6 {
-            return (.portrait, min(0.95, 0.55 + Double(faceCount) * 0.1))
-        }
-
-        // 4) 夜景：暗 + Vision 给 night / 亮度确实低
-        if has("night", "firework", "concert") || (brightness < 0.22 && contrast > 0.18) {
-            return (.night, has("night") ? 0.85 : 0.6)
+        // 1.2 文档票据 —— 必须同时满足"大量文字" + "画面本身很简单"
+        //     关键修正：加 colorfulness 上限和 sharpness 下限的双重约束，
+        //     避免把"有文字的实景照片"（菜单、演讲 PPT、合影）判进来。
+        let docLabel = score(["document", "receipt", "spreadsheet", "whiteboard", "chart"])
+        let looksLikePaper = colorfulness < 0.22 && brightness > 0.45 && ocrLen >= 25
+        let strongDoc = docLabel > 0.45 && ocrLen >= 15 && colorfulness < 0.35
+        if looksLikePaper || strongDoc {
+            // 但如果有明确主体（人脸/动物/食物），说明是实景，不是文档
+            let subjectStrong = faceCount > 0
+                || score(["animal_cat", "animal_dog", "animal", "food", "person", "people"]) > 0.55
+            if !subjectStrong {
+                return (.document, strongDoc ? 0.85 : 0.7)
+            }
         }
 
-        // 5) 宠物 / 动物
-        if has("animal_cat", "animal_dog", "animal", "bird", "insect", "reptile") {
-            return (.pet, 0.8)
+        // =========================================================
+        // 第 2 层：主体类（宠物 / 人像 / 美食）
+        // =========================================================
+
+        let animalScore = score(["animal_cat", "animal_dog", "kitten", "puppy",
+                                 "animal", "reptile", "fish", "hamster"])
+        let foodScore   = score(["food", "dish", "cuisine", "meal", "dessert",
+                                 "beverage", "drink", "coffee", "pizza", "sushi"])
+        let birdScore   = score(["bird"])
+
+        // 2.1 人像：有清晰人脸，且人脸是主要元素
+        //     修正：动物照片常被误检出"人脸"，所以先比动物分数
+        if faceCount >= 1 && animalScore < 0.5 {
+            if faceCount == 1 { return (.portrait, 0.8) }
+            if faceCount <= 4 { return (.portrait, 0.75) }
+            return (.portrait, 0.6)
         }
 
-        // 6) 美食
-        if has("food", "drink", "coffee") {
-            return (.food, 0.8)
+        // 2.2 宠物：动物标签足够强
+        //     修正：玩偶/手工作品可能被判成 bird，需要排除"室内 + 高色彩 + 锐度极高"的小物件特征。
+        //     判断依据：真实动物照片通常有较丰富的背景，而玩偶特写背景单一、对比强烈。
+        if animalScore > 0.45 {
+            return (.pet, animalScore)
+        }
+        // 鸟类单独处理：置信度要求更高，避免玩偶误判
+        if birdScore > 0.55 && colorfulness < 0.42 {
+            return (.pet, birdScore * 0.8)
         }
 
-        // 7) 建筑：竖构图 + 建筑类标签
-        if has("building", "architecture", "house", "interior", "room") {
-            return (.architecture, 0.7)
+        // 2.3 美食
+        if foodScore > 0.45 {
+            return (.food, foodScore)
         }
 
-        // 8) 风景：自然类标签，且横构图、色彩较丰富
-        if has("landscape", "mountain", "beach", "sky", "sunset", "sunrise",
-               "sea", "lake", "snow", "cloud", "water", "nature", "tree") {
-            return (.landscape, pixelRatio >= 1.0 ? 0.85 : 0.7)
+        // =========================================================
+        // 第 3 层：场景类，必须有"场景证据"，不能只靠亮度
+        // =========================================================
+
+        let nightLabel  = score(["night", "dark", "firework", "city_lights"])
+        let buildLabel  = score(["building", "architecture", "skyscraper", "church",
+                                 "tower", "bridge", "house", "facade"])
+        let natureLabel = score(["landscape", "mountain", "beach", "sky", "sunset",
+                                 "sunrise", "sea", "ocean", "lake", "snow", "cloud",
+                                 "nature", "forest", "water", "horizon", "coast"])
+        let streetLabel = score(["street", "road", "sidewalk", "crowd", "traffic",
+                                 "vehicle", "car", "motorcycle", "bicycle"])
+        let indoorLabel = score(["indoor", "room", "interior", "furniture", "bedroom",
+                                 "living_room", "kitchen", "couch", "sofa"])
+
+        // 3.1 夜景：必须是"暗 + 有夜景标签或城市灯光特征"
+        //     关键修正：v1 只看 brightness < 0.22，导致暗光室内的猫全被判成夜景。
+        //     v2 要求：暗 且 (有夜景标签 或 有建筑/城市元素) 且 不是室内。
+        let isDark = brightness < 0.26
+        if isDark && indoorLabel < 0.45 {
+            let hasNightEvidence = nightLabel > 0.3
+                || (buildLabel > 0.35 && contrast > 0.22)
+                || (brightness < 0.14 && contrast > 0.25)
+            if hasNightEvidence {
+                return (.night, nightLabel > 0.3 ? 0.8 : 0.6)
+            }
         }
 
-        // 9) 街拍：有人但脸识别不到（背影/远景）+ 城市场景
-        if has("crowd", "street", "vehicle", "car", "transport", "figure") {
-            return (.street, 0.6)
+        // 3.2 建筑：建筑标签强，且不是室内小物件
+        if buildLabel > 0.4 && pixelRatio < 1.15 {
+            return (.architecture, buildLabel)
         }
 
-        // 10) 静物：无明显主体、色彩集中
-        if colorfulness < 0.5 && contrast > 0.12 {
-            return (.still, 0.5)
+        // 3.3 风景：自然类标签强
+        if natureLabel > 0.4 {
+            return (.landscape, natureLabel)
         }
 
-        // 11) 风景兜底：亮 + 色彩丰富 + 横构图
-        if brightness > 0.45 && colorfulness > 0.45 {
-            return (.landscape, 0.5)
+        // 3.4 街拍：街道/交通标签 + 室外
+        if streetLabel > 0.4 {
+            return (.street, streetLabel)
         }
 
-        return (.other, 0.3)
+        // =========================================================
+        // 第 4 层：兜底
+        // =========================================================
+
+        // 4.1 室内场景 -> 静物
+        if indoorLabel > 0.4 { return (.still, 0.5) }
+
+        // 4.2 无标签但构图提示风景：横构图 + 亮 + 色彩足
+        if pixelRatio > 1.15 && brightness > 0.42 && colorfulness > 0.38 {
+            return (.landscape, 0.4)
+        }
+
+        // 4.3 默认不硬归类，交给用户手动改
+        return (.other, 0.2)
     }
 }
 
@@ -100,13 +185,13 @@ struct KindScorer {
     }
 
     /// 各题材权重（合计 = 1.0）
-    /// 截图同样参与评分，但只评"可读性"：文字锐度 + 分辨率 + 对比度。
-    /// 曝光和色彩对截图没有意义，权重归零。
+    /// 截图不参与质量评分：截图的价值取决于内容，不是画质。
+    /// 所有维度权重为 0，UI 显示「不评分」。
     static func weights(for kind: PhotoKind) -> Weights {
         switch kind {
         case .screenshot:
-            return Weights(sharpness: 0.58, exposure: 0.0, contrast: 0.17,
-                           color: 0.0, noise: 0.05, resolution: 0.20)
+            return Weights(sharpness: 0.0, exposure: 0.0, contrast: 0.0,
+                           color: 0.0, noise: 0.0, resolution: 0.0)
 
         case .document:
             // 文档票据：锐度压倒一切，其次对比度（黑白分明）、低噪点。
@@ -186,7 +271,8 @@ struct KindScorer {
         }
     }
 
-    /// 计算分数 + 问题清单
+    /// 计算分数 + 问题清单。
+    /// 返回 score = -1 表示该题材不参与评分（截图）。
     static func score(kind: PhotoKind,
                       sharpness: Double,
                       brightness: Double,
@@ -195,14 +281,19 @@ struct KindScorer {
                       noise: Double,
                       megapixels: Double) -> (score: Double, issues: [PhotoIssue]) {
 
+        // 截图：不评分，只保留尺寸过小的提示
+        if kind == .screenshot {
+            var issues: [PhotoIssue] = []
+            if megapixels < 0.3 { issues.append(.lowRes) }
+            return (-1, issues)
+        }
+
         let w = weights(for: kind)
         let win = exposureWindow(for: kind)
 
         // 曝光得分：在窗口内满分，窗口外线性衰减
         let expScore: Double
-        if kind == .screenshot {
-            expScore = 1.0
-        } else if brightness < win.low {
+        if brightness < win.low {
             expScore = max(0, brightness / max(0.01, win.low))
         } else if brightness > win.high {
             let span = max(0.01, 1.0 - win.high)
@@ -211,13 +302,8 @@ struct KindScorer {
             expScore = 1.0
         }
 
-        // 分辨率得分：截图目标是"能看清字"，约 3MP 就够
-        let mpTarget: Double
-        switch kind {
-        case .screenshot: mpTarget = 2.5
-        case .document:   mpTarget = 6.0
-        default:          mpTarget = 10.0
-        }
+        // 分辨率得分
+        let mpTarget: Double = (kind == .document) ? 6.0 : 10.0
         let mpScore = min(1.0, megapixels / mpTarget)
 
         let noiseScore = 1.0 - noise
@@ -239,7 +325,7 @@ struct KindScorer {
             s *= (1.0 - 0.45 * min(1.0, deficit))
         }
 
-        if kind != .screenshot && kind != .night {
+        if kind != .night {
             if brightness < win.low * 0.62 { issues.append(.dark) }
             if brightness > 0.93 { issues.append(.overexposed) }
         }
@@ -248,13 +334,11 @@ struct KindScorer {
             issues.append(.lowContrast)
         }
 
-        if noise > 0.62 && kind != .screenshot {
+        if noise > 0.62 {
             issues.append(.noisy)
         }
 
-        // 分辨率：截图按 1MP 判定（低于此基本看不清内容）
-        let resFloor: Double = (kind == .screenshot) ? 1.0 : 1.0
-        if megapixels < resFloor {
+        if megapixels < 1.0 {
             issues.append(.lowRes)
         }
 

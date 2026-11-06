@@ -191,7 +191,7 @@ struct ScanView: View {
     private var kindBar: some View {
         let total = max(1, scanner.records.count)
         var counter: [PhotoKind: Int] = [:]
-        for r in scanner.records { counter[r.kind, default: 0] += 1 }
+        for r in scanner.records { counter[r.effectiveKind, default: 0] += 1 }
         let rows = counter.sorted { $0.value > $1.value }
         return VStack(alignment: .leading, spacing: 5) {
             ForEach(rows, id: \.key) { kind, n in
