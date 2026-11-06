@@ -1,0 +1,302 @@
+name: Build MNN Chat iOS IPA
+
+# 用法：
+#   1) GitHub 新建空仓库（public，Actions 才免费）
+#   2) 本文件放到 .github/workflows/build-mnn-ios.yml
+#   3) Actions -> "Build MNN Chat iOS IPA" -> Run workflow，选 sign_mode
+#   4) 跑完在 Artifacts 下载 ipa
+#
+# sign_mode 说明：
+#   unsigned —— 不签名，产出裸 ipa，交给 Sideloadly 重签。
+#               受限 entitlements 会被强制清空（否则签不上）。
+#               免费账号 / 只想快速试水 用这个。
+#   signed   —— 用你自己的证书 + 描述文件正式签名，保留全部 entitlements。
+#               付费开发者账号用这个，证书有效期 1 年，内存上限不缩水。
+#
+# signed 模式需要在仓库 Settings -> Secrets and variables -> Actions 里配：
+#   BUILD_CERT_P12_BASE64        .p12 证书（含私钥）的 base64
+#   BUILD_CERT_PASSWORD          .p12 的导出密码
+#   PROVISIONING_PROFILE_BASE64  .mobileprovision 的 base64
+#   KEYCHAIN_PASSWORD            随便一个字符串，仅用于 CI 临时钥匙串
+#   TEAM_ID                      你的 10 位 Team ID
+#   BUNDLE_ID                    你的 App ID，例如 com.yourname.mnnchat
+# 详见 MNN-iPhone-安装指南.md 第 6 节。
+
+on:
+  workflow_dispatch:
+    inputs:
+      sign_mode:
+        description: "签名方式"
+        type: choice
+        options: [unsigned, signed]
+        default: unsigned
+      mnn_ref:
+        description: "MNN 分支或 tag"
+        required: false
+        default: master
+      with_diffusion:
+        description: "编译 Diffusion（文生图）。关掉可省 30% 编译时间"
+        type: boolean
+        default: true
+  push:
+    branches: [main, master]
+
+env:
+  # 已按 master(2026-11) 的 CMakeLists 校验：
+  #   - MNN_CPU_WEIGHT_DEQUANT_GEMM 已被永久移除（根 CMakeLists L90），传了只会告警
+  #   - LLM_SUPPORT_AUDIO / LLM_SUPPORT_VISION 不存在，OMNI 会自动拉起
+  #   - MNN_BUILD_LLM 会自动 FORCE 打开 MNN_LOW_MEMORY + MNN_SUPPORT_TRANSFORMER_FUSE
+  #   - MNN_BUILD_LLM_OMNI 会自动 FORCE 打开 OPENCV + AUDIO + IMGCODECS
+  # 这里仍显式写出被 FORCE 的项，是为了让日志可读、便于排查
+  MNN_CMAKE_FLAGS: >-
+    -DMNN_ARM82=ON
+    -DMNN_BUILD_LLM=ON
+    -DMNN_BUILD_LLM_OMNI=ON
+    -DMNN_METAL=ON
+    -DMNN_OPENCL=OFF
+    -DMNN_SEP_BUILD=OFF
+    -DMNN_LOW_MEMORY=ON
+    -DMNN_SUPPORT_TRANSFORMER_FUSE=ON
+    -DMNN_BUILD_AUDIO=ON
+    -DMNN_BUILD_OPENCV=ON
+    -DMNN_IMGCODECS=ON
+
+jobs:
+  build-ipa:
+    runs-on: macos-15          # 若 Xcode 版本不兼容，改成 macos-14
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout MNN upstream
+        uses: actions/checkout@v4
+        with:
+          repository: alibaba/MNN
+          ref: ${{ inputs.mnn_ref || 'master' }}
+          path: MNN
+
+      - name: Toolchain info
+        working-directory: MNN
+        run: |
+          sw_vers
+          xcodebuild -version
+          cmake --version
+          git log -1 --oneline
+
+      # buildiOS.sh 必须在仓库根目录执行（内部用 ../../../ 回推根目录）
+      - name: Build MNN.framework
+        working-directory: MNN
+        run: |
+          set -euo pipefail
+          FLAGS="$MNN_CMAKE_FLAGS"
+          if [ "${{ inputs.with_diffusion }}" != "false" ]; then
+            FLAGS="$FLAGS -DMNN_BUILD_DIFFUSION=ON"
+          fi
+          echo "cmake flags: $FLAGS"
+          sh package_scripts/ios/buildiOS.sh "$FLAGS"
+
+      - name: Verify and install framework
+        working-directory: MNN
+        run: |
+          set -euo pipefail
+          FW=MNN-iOS-CPU-GPU/Static/MNN.framework
+          [ -d "$FW" ] || { echo "::error::MNN.framework 未生成"; exit 1; }
+          du -sh "$FW"
+          rm -rf apps/iOS/MNNLLMChat/MNN.framework
+          cp -R "$FW" apps/iOS/MNNLLMChat/
+
+      # ---------- unsigned 分支：清掉受限权限 ----------
+      # 免费 profile 签不了这两个 key，留着会导致安装失败或启动即崩
+      - name: Neutralize entitlements (unsigned mode)
+        if: ${{ inputs.sign_mode != 'signed' }}
+        working-directory: MNN/apps/iOS/MNNLLMChat
+        run: |
+          cat > MNNLLMiOS/MNNLLMiOS.entitlements <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict/>
+          </plist>
+          PLIST
+          echo "entitlements cleared:"; cat MNNLLMiOS/MNNLLMiOS.entitlements
+
+      # ---------- signed 分支：保留受限权限 ----------
+      - name: Keep entitlements (signed mode)
+        if: ${{ inputs.sign_mode == 'signed' }}
+        working-directory: MNN/apps/iOS/MNNLLMChat
+        run: |
+          echo "保留原始 entitlements："
+          cat MNNLLMiOS/MNNLLMiOS.entitlements
+          echo ""
+          echo "::notice::前提是你的 App ID 已在开发者后台勾选"
+          echo "::notice::Extended Virtual Addressing 和 Increased Memory Limit"
+
+      - name: Import signing certificate
+        if: ${{ inputs.sign_mode == 'signed' }}
+        env:
+          CERT_B64: ${{ secrets.BUILD_CERT_P12_BASE64 }}
+          CERT_PWD: ${{ secrets.BUILD_CERT_PASSWORD }}
+          KC_PWD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN=$RUNNER_TEMP/build.keychain-db
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PWD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PWD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KC_PWD" "$KEYCHAIN" > /dev/null
+          security list-keychain -d user -s "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "--- identities ---"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Install provisioning profile
+        if: ${{ inputs.sign_mode == 'signed' }}
+        env:
+          PROFILE_B64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$DIR"
+          echo "$PROFILE_B64" | base64 --decode > "$DIR/mnn.mobileprovision"
+          security cms -D -i "$DIR/mnn.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+          echo "--- profile ---"
+          /usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/profile.plist"
+          /usr/libexec/PlistBuddy -c "Print :TeamIdentifier:0" "$RUNNER_TEMP/profile.plist"
+          echo "--- entitlements in profile ---"
+          /usr/libexec/PlistBuddy -c "Print :Entitlements" "$RUNNER_TEMP/profile.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/profile.plist" > "$RUNNER_TEMP/profile_uuid.txt"
+          cat "$RUNNER_TEMP/profile_uuid.txt"
+
+      - name: Resolve Swift packages
+        working-directory: MNN/apps/iOS/MNNLLMChat
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project MNNLLMiOS.xcodeproj \
+            -scheme MNNLLMiOS \
+            -clonedSourcePackagesDirPath spm
+
+      - name: Build app (unsigned)
+        if: ${{ inputs.sign_mode != 'signed' }}
+        working-directory: MNN/apps/iOS/MNNLLMChat
+        run: |
+          xcodebuild \
+            -project MNNLLMiOS.xcodeproj \
+            -scheme MNNLLMiOS \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -clonedSourcePackagesDirPath spm \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Build app (signed)
+        if: ${{ inputs.sign_mode == 'signed' }}
+        working-directory: MNN/apps/iOS/MNNLLMChat
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+        run: |
+          set -euo pipefail
+          PROFILE_UUID=$(cat "$RUNNER_TEMP/profile_uuid.txt")
+          echo "using profile UUID: $PROFILE_UUID"
+          xcodebuild \
+            -project MNNLLMiOS.xcodeproj \
+            -scheme MNNLLMiOS \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -clonedSourcePackagesDirPath spm \
+            -allowProvisioningUpdates \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            build
+
+      - name: Verify signature
+        if: ${{ inputs.sign_mode == 'signed' }}
+        working-directory: MNN/apps/iOS/MNNLLMChat
+        run: |
+          set -euo pipefail
+          APP=build/Build/Products/Release-iphoneos/MNNLLMiOS.app
+
+          echo "--- codesign identity ---"
+          codesign -dv "$APP" 2>&1 || true
+
+          echo "--- entitlements actually embedded ---"
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/ent.plist" 2>/dev/null || true
+          cat "$RUNNER_TEMP/ent.plist" || true
+
+          # 这两个 key 决定能否跑 4B 以上模型，丢了就等于白花账号钱
+          if grep -q "increased-memory-limit" "$RUNNER_TEMP/ent.plist"; then
+            echo "::notice::increased-memory-limit 已生效"
+          else
+            echo "::warning::签名里没有 increased-memory-limit！"
+            echo "::warning::检查开发者后台 App ID 是否勾选了 Increased Memory Limit，"
+            echo "::warning::以及描述文件是否在勾选之后重新生成。"
+          fi
+          if grep -q "extended-virtual-addressing" "$RUNNER_TEMP/ent.plist"; then
+            echo "::notice::extended-virtual-addressing 已生效"
+          else
+            echo "::warning::签名里没有 extended-virtual-addressing，mmap 长上下文会受限"
+          fi
+
+          echo "--- verify ---"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Package unsigned IPA
+        if: ${{ inputs.sign_mode != 'signed' }}
+        working-directory: MNN
+        run: |
+          set -euo pipefail
+          APP=apps/iOS/MNNLLMChat/build/Build/Products/Release-iphoneos/MNNLLMiOS.app
+          [ -d "$APP" ] || { echo "::error::$APP 不存在"; exit 1; }
+          du -sh "$APP"
+          rm -rf Payload MNNChat-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # 裸 ipa 必须去掉签名残留，否则 Sideloadly 重签会冲突
+          rm -rf "Payload/MNNLLMiOS.app/_CodeSignature"
+          find "Payload/MNNLLMiOS.app" -name "*.xcent" -delete || true
+          zip -qry MNNChat-unsigned.ipa Payload
+          ls -lh MNNChat-unsigned.ipa
+          shasum -a 256 MNNChat-unsigned.ipa
+
+      - name: Package signed IPA
+        if: ${{ inputs.sign_mode == 'signed' }}
+        working-directory: MNN
+        run: |
+          set -euo pipefail
+          APP=apps/iOS/MNNLLMChat/build/Build/Products/Release-iphoneos/MNNLLMiOS.app
+          [ -d "$APP" ] || { echo "::error::$APP 不存在"; exit 1; }
+          du -sh "$APP"
+          rm -rf Payload MNNChat-signed.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # 已签名的 app 必须保留 _CodeSignature，不要删
+          zip -qry MNNChat-signed.ipa Payload
+          ls -lh MNNChat-signed.ipa
+          shasum -a 256 MNNChat-signed.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.sign_mode == 'signed' && 'MNNChat-signed-ipa' || 'MNNChat-unsigned-ipa' }}
+          path: MNN/MNNChat-*.ipa
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            MNN/MNN-iOS-CPU-GPU
+          retention-days: 7
+          if-no-files-found: ignore
