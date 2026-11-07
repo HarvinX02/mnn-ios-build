@@ -74,6 +74,27 @@ jobs:
           ref: ${{ inputs.mnn_ref || 'master' }}
           path: MNN
 
+      - name: Inject MNN-Pocket-0.3B model
+        working-directory: MNN
+        env:
+          POCKET_REPO: MNN/MNN-Pocket-0.3B-MNN
+          POCKET_DIR: apps/iOS/MNNLLMChat/MNNLLMiOS/LocalModel/MNN-Pocket-0.3B-MNN
+        run: |
+          set -euo pipefail
+          mkdir -p "$POCKET_DIR"
+          BASE="https://www.modelscope.cn/models/${POCKET_REPO}/resolve/master"
+          for f in config.json llm_config.json llm.mnn llm.mnn.weight tokenizer.mtok; do
+            echo "==> downloading $f"
+            curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 -o "$POCKET_DIR/$f" "$BASE/$f"
+          done
+          ls -lh "$POCKET_DIR"
+          # 掉文件 / 半截下载就别继续，省得产出装上去跑不起来的 ipa
+          test -s "$POCKET_DIR/llm.mnn.weight"
+          test "$(stat -f%z "$POCKET_DIR/llm.mnn.weight")" -gt 150000000
+          test -s "$POCKET_DIR/tokenizer.mtok"
+          test -s "$POCKET_DIR/llm_config.json"
+          echo "model size: $(du -sh "$POCKET_DIR" | cut -f1)"
+
       - name: Toolchain info
         working-directory: MNN
         run: |
@@ -284,6 +305,20 @@ jobs:
           ls -lh MNNChat-signed.ipa
           shasum -a 256 MNNChat-signed.ipa
 
+      - name: Verify model inside packaged IPA
+        working-directory: MNN
+        run: |
+          set -euo pipefail
+          IPA=$(ls MNNChat-*.ipa | head -1)
+          echo "ipa: $IPA ($(du -h "$IPA" | cut -f1))"
+          unzip -l "$IPA" | grep -E 'LocalModel/MNN-Pocket-0\.3B-MNN/' || { echo "::error::LocalModel 里没有 MNN-Pocket-0.3B-MNN"; exit 1; }
+          W=$(unzip -l "$IPA" | awk '$4 ~ /MNN-Pocket-0\.3B-MNN\/llm\.mnn\.weight$/ {print $1; exit}')
+          echo "llm.mnn.weight 未压缩字节: ${W:-missing}"
+          [ -n "${W:-}" ] && [ "$W" -gt 150000000 ] || { echo "::error::llm.mnn.weight 不在包里或太小"; exit 1; }
+          for f in config.json llm_config.json llm.mnn tokenizer.mtok; do
+            unzip -l "$IPA" | grep -q "MNN-Pocket-0.3B-MNN/$f" || { echo "::error::缺 $f"; exit 1; }
+          done
+          echo "OK: 5 个模型文件都在 ipa 里"
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
